@@ -2,7 +2,7 @@
 
 All notable changes to the custom Claude Code statusline.
 
-## 2026-08-10 — Badges respect plugin disable
+## v1.0.0 — 2026-08-10 — Badges respect plugin disable
 
 ### Fixed
 - **Caveman/ponytail badge lingered after its plugin was disabled.** The
