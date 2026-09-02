@@ -2,21 +2,26 @@
 
 All notable changes to the custom Claude Code statusline.
 
-## Unreleased — 2026-09-02 — Context badge
+## v1.1.0 — 2026-09-02 — Context badge
 
 ### Added
 - **Context badge** `[ Ctx 58k/467k ]` between the model and limits badges:
   tokens now in context (from `.context_window.current_usage`, the figure
-  `/context` reports) over the token count where auto-compact fires. Plain dim
-  text, deliberately untinted — context is informational, not a limit. The threshold follows Claude Code's own
-  `/context` auto-compact threshold formula (`min(window, autoCompactWindow) −
-  min(max output, 20k) − 13k`), resolving `autoCompactWindow` from env
-  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then project-local / project / user
-  `settings.json`, then the model window. With auto-compact disabled the
-  denominator is the full window and the badge is marked `∅ compact`. Hidden until the first API
-  response (no `current_usage` yet).
+  `/context` reports) over the token count where auto-compact fires. Plain
+  dim text, deliberately untinted — context is informational, not a limit.
+  The threshold follows Claude Code's own `/context` auto-compact formula
+  (`min(window, autoCompactWindow) − min(max output, 20k) − 13k`), resolving
+  `autoCompactWindow` from env `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then
+  project-local / project / user `settings.json`, then the model window, so
+  it adapts on model switch. With auto-compact disabled the denominator is
+  the full window and the badge is marked `∅ compact`. Hidden until the
+  first API response (no `current_usage` yet).
 
 ### Notes
+- Malformed input degrades quietly: non-integer or oversized token counts,
+  missing `context_window`, malformed or symlinked settings files, and env
+  flags set to `0`/`false` all hide the badge or fall through to the next
+  scope rather than erroring.
 - A session-only `/autocompact <n>` override is not exposed in the statusline
   JSON, so the badge keeps using the persisted window until it is written to
   settings.
