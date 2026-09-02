@@ -2,6 +2,25 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## Unreleased — 2026-09-02 — Context badge
+
+### Added
+- **Context badge** `[ Ctx 58k/467k ]` between the model and limits badges:
+  tokens now in context (from `.context_window.current_usage`, the figure
+  `/context` reports) over the token count where auto-compact fires. Plain dim
+  text, deliberately untinted — context is informational, not a limit. The threshold follows Claude Code's own
+  `/context` auto-compact threshold formula (`min(window, autoCompactWindow) −
+  min(max output, 20k) − 13k`), resolving `autoCompactWindow` from env
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then project-local / project / user
+  `settings.json`, then the model window. With auto-compact disabled the
+  denominator is the full window and the badge is marked `∅ compact`. Hidden until the first API
+  response (no `current_usage` yet).
+
+### Notes
+- A session-only `/autocompact <n>` override is not exposed in the statusline
+  JSON, so the badge keeps using the persisted window until it is written to
+  settings.
+
 ## v1.0.0 — 2026-08-10 — Badges respect plugin disable
 
 ### Fixed

@@ -1,11 +1,11 @@
 #!/bin/bash
 # Custom Claude Code statusline — two lines:
-#   [ <model> <effort> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <saved> ] [ 🎀 <mode> ]
+#   [ <model> <effort> ] [ Ctx <used>/<threshold> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <saved> ] [ 🎀 <mode> ]
 #   <user>@<host>:<dir>
 #
-# Line 1 badges: model/effort, usage limits (tiers: <50 green, 50-74 blue,
-# 75-89 yellow, >=90 red; clock-synced shared fetch, see below), caveman badge,
-# ponytail badge.
+# Line 1 badges: model/effort, context usage vs the auto-compact threshold
+# (plain, untinted), usage limits (tiers: <50 green, 50-74 blue, 75-89 yellow,
+# >=90 red; clock-synced shared fetch, see below), caveman badge, ponytail badge.
 # Line 2 prompt-style location in teal/steel-blue — deliberately NOT the classic
 # green/blue PS1 palette so it never reads as a real shell prompt. Long paths
 # get a whole line, so they can't push the badges off-screen.
@@ -30,8 +30,11 @@ esac
 user=$(id -un 2>/dev/null)
 host=$(hostname -s 2>/dev/null || hostname 2>/dev/null)
 
-# Line 1: badges (model/effort, limits, caveman, ponytail). Line 2: user@host:dir —
-# printed at the end, so long paths never push the badges around.
+# Line 1: badges (model/effort, context, limits, caveman, ponytail). Line 2:
+# user@host:dir — printed at the end, so long paths never push the badges around.
+
+# tiers: <50 green, 50-74 blue, 75-89 yellow, >=90 red
+_cc() { if [ "${1:-0}" -ge 90 ]; then printf 167; elif [ "${1:-0}" -ge 75 ]; then printf 178; elif [ "${1:-0}" -ge 50 ]; then printf 117; else printf 114; fi; }
 
 # Current model + effort level, e.g. "[ Fable 5 xhigh ]". Effort is absent when
 # the model doesn't support the effort parameter, so it's appended conditionally.
@@ -41,6 +44,83 @@ if [ -n "$model" ]; then
   printf ' \033[1;38;5;252m[\033[0m \033[38;5;141m%s\033[0m' "$model"
   [ -n "$effort" ] && printf ' \033[38;5;245m%s\033[0m' "$effort"
   printf ' \033[1;38;5;252m]\033[0m'
+fi
+
+# Context usage: "[ Ctx 58k/467k ]" — tokens in context now / tokens at which
+# auto-compact fires, plain dim text (no tier tint — informational). Tokens = input +
+# cache_create + cache_read of the last API call (.context_window.current_usage,
+# the same number /context reports); the threshold mirrors Claude Code's own
+# "% until auto-compact" / the /context autoCompactThreshold:
+#   threshold = min(model window, autoCompactWindow) - min(max_output, 20000) - 13000
+# autoCompactWindow: env CLAUDE_CODE_AUTO_COMPACT_WINDOW > settings (project
+# local > project > user) > model window. A session-only /autocompact override
+# is not visible from here, so the badge follows the persisted value.
+# When auto-compact is off (autoCompactEnabled=false, DISABLE_AUTO_COMPACT or
+# DISABLE_COMPACT set) the denominator is the full window, marked "∅ compact".
+# Hidden until the first API response.
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+read -r cx_used cx_win <<< "$(printf '%s' "$input" | jq -r '
+  .context_window as $c
+  | if ($c | type) != "object" or ($c.current_usage | type) != "object" then "" else
+    ((($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
+      + ($c.current_usage.cache_read_input_tokens // 0)) | floor | tostring)
+    + " " + (($c.context_window_size // 0) | floor | tostring) end' 2>/dev/null)"
+# digits only past this point: any surprise (floats, "null", missing jq) hides the badge
+cx_used=$(printf '%s' "$cx_used" | tr -cd '0-9'); cx_win=$(printf '%s' "$cx_win" | tr -cd '0-9')
+if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_used}" -le 12 ] && [ "$cx_win" -gt 0 ]; then
+  _tk() {  # tokens -> compact: 812 / 58k / 467k / 1.2M
+    local n=$1
+    if [ "$n" -ge 1000000 ]; then
+      local m=$(( (n + 50000) / 100000 ))   # tenths of a million, rounded
+      if [ $(( m % 10 )) -eq 0 ]; then printf '%dM' $(( m / 10 )); else printf '%d.%dM' $(( m / 10 )) $(( m % 10 )); fi
+    elif [ "$n" -ge 1000 ]; then printf '%dk' $(( (n + 500) / 1000 ))
+    else printf '%d' "$n"; fi
+  }
+  _truthy() {  # env flag set the way Claude Code reads it (1/true/yes/on); 0/false/no/off/"" = unset
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in ''|0|false|no|off) return 1 ;; *) return 0 ;; esac
+  }
+  # autoCompactEnabled / autoCompactWindow from settings, most specific scope
+  # wins per key: project local > project > user. One jq per existing file;
+  # a malformed file is skipped, not fatal. `false` must survive, so no `//`.
+  ac_en=""; ac_win=""
+  for f in "$cwd/.claude/settings.local.json" "$cwd/.claude/settings.json" "$CFG/settings.json"; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    IFS=$'\x1f' read -r e w <<< "$(jq -r '
+      def v(k): if has(k) and .[k] != null then (.[k] | tostring) else "" end;
+      if type == "object" then [v("autoCompactEnabled"), v("autoCompactWindow")] | join("") else "" end
+    ' "$f" 2>/dev/null)"
+    [ -z "$ac_en" ]  && ac_en=$e
+    [ -z "$ac_win" ] && ac_win=$(printf '%s' "$w" | tr -cd '0-9')
+    [ -n "$ac_en" ] && [ -n "$ac_win" ] && break
+  done
+  cx_on=1
+  [ "$ac_en" = false ] && cx_on=0
+  { _truthy "${DISABLE_AUTO_COMPACT:-}" || _truthy "${DISABLE_COMPACT:-}"; } && cx_on=0
+  if [ "$cx_on" = 1 ]; then
+    # window: env (Claude Code accepts 100k..1M) > settings > model window; never above model window
+    acw=$(printf '%s' "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" | tr -cd '0-9' | head -c 12)
+    if [ -n "$acw" ]; then
+      [ "$acw" -lt 100000 ] && acw=100000
+      [ "$acw" -gt 1000000 ] && acw=1000000
+    fi
+    [ -z "$acw" ] && acw=$(printf '%s' "$ac_win" | head -c 12)
+    { [ -z "$acw" ] || [ "$acw" -gt "$cx_win" ]; } && acw=$cx_win
+    mo=$(printf '%s' "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" | tr -cd '0-9' | head -c 12)
+    { [ -z "$mo" ] || [ "$mo" -gt 20000 ]; } && mo=20000
+    cx_thr=$(( acw - mo - 13000 ))
+    pct_ov=$(printf '%s' "${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-}" | tr -cd '0-9' | head -c 3)
+    if [ -n "$pct_ov" ] && [ "$pct_ov" -gt 0 ] && [ "$pct_ov" -le 100 ]; then
+      t2=$(( (acw - mo) * pct_ov / 100 )); [ "$t2" -lt "$cx_thr" ] && cx_thr=$t2
+    fi
+    [ "$cx_thr" -lt 1 ] && cx_thr=1
+    suffix=""
+  else
+    cx_thr=$cx_win
+    suffix=" ∅ compact"
+  fi
+  # no tier tint: context is informational, not a limit — plain dim text
+  printf ' \033[1;38;5;252m[\033[0m \033[38;5;250mCtx\033[0m \033[38;5;245m%s/%s%s\033[0m \033[1;38;5;252m]\033[0m' \
+    "$(_tk "$cx_used")" "$(_tk "$cx_thr")" "$suffix"
 fi
 
 # Claude usage limits: 5-hour + weekly (seven_day).
@@ -53,7 +133,6 @@ fi
 # stale, so the boundary check fires on the first render — instant limits
 # either way. Never more than one fetch per 5s. Harness rate_limits is fallback
 # only — per-session snapshots diverge, which the shared store exists to avoid.
-CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SHARED="$CFG/.statusline-limits-fetch"
 now_s=$(date +%s)
 last=0
@@ -108,8 +187,6 @@ if [ -n "${lim// /}" ] && printf '%s' "$lim" | grep -q '[0-9]'; then
     elif [ "$d" -ge 3600 ];  then printf '%dh%dm' $((d/3600)) $(((d%3600)/60))
     else printf '%dm' $((d/60)); fi
   }
-  # tiers: <50 green, 50-74 blue, 75-89 yellow, >=90 red
-  _cc() { if [ "${1:-0}" -ge 90 ]; then printf 167; elif [ "${1:-0}" -ge 75 ]; then printf 178; elif [ "${1:-0}" -ge 50 ]; then printf 117; else printf 114; fi; }
   _seg() {  # label pct epoch -> "label pct ↻ countdown" (label grey, pct bold/threshold, countdown dim)
     local pct=$2 cd; cd=$(_cd "$3")
     # harness only refreshes rate_limits on API responses, so after the window
