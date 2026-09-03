@@ -47,27 +47,56 @@ if [ -n "$model" ]; then
 fi
 
 # Context usage: "[ Ctx 58k/467k ]" — tokens in context now / tokens at which
-# auto-compact fires, plain dim text (no tier tint — informational). Tokens = input +
-# cache_create + cache_read of the last API call (.context_window.current_usage,
-# the same number /context reports); the threshold mirrors Claude Code's own
-# "% until auto-compact" / the /context autoCompactThreshold:
+# auto-compact fires, plain dim text (no tier tint — informational).
+# "Now" is what Claude Code's own trigger compares, not just the last usage:
+#   last response (input + cache_create + cache_read + OUTPUT tokens, from
+#   .context_window.current_usage)
+#   + estimate of everything appended to the transcript since that response
+#     (tool results, hook/system-reminder attachments) at the same chars/token
+#     rule the trigger uses: 3 chars/token (4 for pre-4.7 models), images 2000
+# Without the extra terms the badge reads ~2k low and compaction seems early.
+# The threshold mirrors the /context autoCompactThreshold:
 #   threshold = min(model window, autoCompactWindow) - min(max_output, 20000) - 13000
-# autoCompactWindow: env CLAUDE_CODE_AUTO_COMPACT_WINDOW > settings (project
-# local > project > user) > model window. A session-only /autocompact override
-# is not visible from here, so the badge follows the persisted value.
-# When auto-compact is off (autoCompactEnabled=false, DISABLE_AUTO_COMPACT or
-# DISABLE_COMPACT set) the denominator is the full window, marked "∅ compact".
-# Hidden until the first API response.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 read -r cx_used cx_win <<< "$(printf '%s' "$input" | jq -r '
   .context_window as $c
   | if ($c | type) != "object" or ($c.current_usage | type) != "object" then "" else
     ((($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
-      + ($c.current_usage.cache_read_input_tokens // 0)) | floor | tostring)
+      + ($c.current_usage.cache_read_input_tokens // 0) + ($c.current_usage.output_tokens // 0)) | floor | tostring)
     + " " + (($c.context_window_size // 0) | floor | tostring) end' 2>/dev/null)"
 # digits only past this point: any surprise (floats, "null", missing jq) hides the badge
 cx_used=$(printf '%s' "$cx_used" | tr -cd '0-9'); cx_win=$(printf '%s' "$cx_win" | tr -cd '0-9')
 if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_used}" -le 12 ] && [ "$cx_win" -gt 0 ]; then
+  # Pending tokens: transcript lines after the last assistant entry (tool
+  # results, attachments) estimated the way the trigger does. tac + early-exit
+  # awk reads only the tail, so a multi-MB transcript stays cheap.
+  tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+  if [ -n "$tp" ] && [ -f "$tp" ] && [ ! -L "$tp" ]; then
+    mid=$(printf '%s' "$input" | jq -r '.model.id // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr '._' '--')
+    mid=${mid##*/}; mid=${mid%\[1m\]}; mid=$(printf '%s' "$mid" | sed -E 's/-v[0-9]+(:[0-9]+)?$//; s/-[0-9]{8}$//')
+    case "$mid" in  # older models tokenize ~4 chars/token, everything newer 3
+      *claude-3-*|*claude-opus-4-[0156]|*claude-sonnet-4-[056]|*claude-haiku-4-5) cpt=4 ;;
+      *) cpt=3 ;;
+    esac
+    pend=$(tac "$tp" 2>/dev/null | awk '/"type":"assistant"/{exit} {print}' | jq -n -R --argjson cpt "$cpt" '
+      def est:
+        if type == "string" then (length / $cpt | round)
+        elif type == "array" then (map(
+            if type == "string" then (length / $cpt | round)
+            elif .type == "text" then ((.text // "") | length / $cpt | round)
+            elif .type == "image" or .type == "document" then 2000
+            elif .type == "tool_result" then (.content | est)
+            elif .type == "tool_use" then (((.name // "") + ((.input // {}) | tojson)) | length / $cpt | round)
+            elif .type == "thinking" then ((.thinking // "") | length / $cpt | round)
+            else (tojson | length / $cpt | round) end) | add // 0)
+        elif type == "null" then 0
+        else (tojson | length / $cpt | round) end;
+      reduce (inputs | fromjson? // empty) as $l (0;
+        . + (if $l.type == "user" or $l.type == "assistant" then ($l.message.content | est)
+             elif $l.type == "attachment" then (($l.attachment.text // $l.attachment.content // null) | est)
+             else 0 end))' 2>/dev/null | tr -cd '0-9')
+    [ -n "$pend" ] && [ "${#pend}" -le 12 ] && cx_used=$(( cx_used + pend ))
+  fi
   _tk() {  # tokens -> compact: 812 / 58k / 467k / 1.2M
     local n=$1
     if [ "$n" -ge 1000000 ]; then

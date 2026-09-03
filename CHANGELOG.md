@@ -2,6 +2,21 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.1.1 — 2026-09-03 — Context badge counts what the trigger counts
+
+### Fixed
+- **Compaction appeared to fire ~2k early** (badge read 465k against a 467k
+  threshold). Claude Code's trigger compares more than the last API usage:
+  it adds the last response's output tokens plus a chars-per-token estimate
+  of every message appended since (tool results, hook and system-reminder
+  attachments). The badge now does the same — output tokens from
+  `.context_window.current_usage`, pending messages from the tail of
+  `.transcript_path` using the trigger's own rule (3 chars/token, 4 for
+  pre-4.7 models, images 2000) — so it reaches the threshold exactly when
+  compaction fires. Only the transcript tail is read (`tac` + early-exit
+  `awk`); a missing, symlinked or malformed transcript just skips the
+  estimate.
+
 ## v1.1.0 — 2026-09-02 — Context badge
 
 ### Added

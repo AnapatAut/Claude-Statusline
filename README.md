@@ -10,9 +10,14 @@ user@host:~/some/long/project/dir
 - **model + effort** — from statusline JSON (`.model.display_name`, `.effort.level`)
 - **Ctx** — tokens currently in context / the token count where auto-compact
   fires. Plain dim text, no tier colors: context is informational, not a limit.
-  Tokens come from `.context_window.current_usage` (input + cache-create +
-  cache-read of the last API call — the number `/context` reports as used).
-  The denominator mirrors Claude Code's own `/context` auto-compact threshold:
+  The used figure is what Claude Code's compaction trigger actually compares,
+  not just the last API usage: last response tokens (input + cache-create +
+  cache-read + output, from `.context_window.current_usage`) plus an estimate
+  of everything appended to the transcript since (tool results, hook and
+  system-reminder attachments) at the trigger's own chars-per-token rule
+  (3, or 4 for pre-4.7 models; images 2000). Only the transcript tail is read
+  (`tac` + early exit), so large transcripts stay cheap. The denominator
+  mirrors Claude Code's own `/context` auto-compact threshold:
   `min(model window, autoCompactWindow) − min(max output tokens, 20k) − 13k`
   summary buffer, where `autoCompactWindow` resolves env
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (100k–1M) > `settings.json` (project local >
@@ -22,7 +27,8 @@ user@host:~/some/long/project/dir
   statusline, so the badge follows the persisted value. With auto-compact off
   (`autoCompactEnabled: false`, `DISABLE_AUTO_COMPACT`, `DISABLE_COMPACT`) the
   denominator is the full window and the badge is marked `∅ compact`. Absent
-  until the first API response.
+  until the first API response. `/context` shows a smaller used figure: it
+  reports the last usage without output tokens or pending tool results.
 - **Session / Weekly limits** — color tiers (<50 green, 50–74 blue, 75–89 yellow, ≥90 red), compact reset countdown (`2d7h` → `3h53m` → `29m` as reset nears).
   All sessions read one shared store refreshed from the OAuth usage endpoint on
   wall-clock 30s boundaries (xx:00/xx:30), so every session shows identical values
