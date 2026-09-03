@@ -2,6 +2,28 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.2.0 — 2026-09-03 — Context badge as percent of compact budget
+
+### Changed
+- **Context badge format** is now `[ Ctx 12% / 467k ]`: share of the
+  auto-compact budget in use, then the budget. The percentage is floored and
+  clamped at 100%, so it hits 100% exactly when compaction fires and never
+  earlier (`99%` = within ~4.7k tokens). Used-token count dropped from the
+  badge (`/context` still has it). Disabled auto-compact reads
+  `[ Ctx 5% / 1M ∅ compact ]`.
+
+### Fixed
+- **Pending-token scan overcounted right after a compaction**: the tool
+  result that triggered compaction sits just before the `compact_boundary`
+  line, and the tail scan walked past the boundary into it. The scan now
+  stops at a boundary as well as at the last API response.
+- **Badge vanished until the next API response** on a fresh session and
+  right after a compaction (no `current_usage` yet). It now shows the pending
+  estimate alone (prompt, attachments, compaction summary), which is exactly
+  what the trigger counts at that moment.
+- `queued_command` attachments (their text lives in `.prompt`) are now
+  counted; `tac` falls back to `tail -r` on BSD/macOS.
+
 ## v1.1.1 — 2026-09-03 — Context badge counts what the trigger counts
 
 ### Fixed

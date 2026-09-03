@@ -1,6 +1,6 @@
 #!/bin/bash
 # Custom Claude Code statusline — two lines:
-#   [ <model> <effort> ] [ Ctx <used>/<threshold> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <saved> ] [ 🎀 <mode> ]
+#   [ <model> <effort> ] [ Ctx <pct> / <threshold> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <saved> ] [ 🎀 <mode> ]
 #   <user>@<host>:<dir>
 #
 # Line 1 badges: model/effort, context usage vs the auto-compact threshold
@@ -46,8 +46,9 @@ if [ -n "$model" ]; then
   printf ' \033[1;38;5;252m]\033[0m'
 fi
 
-# Context usage: "[ Ctx 58k/467k ]" — tokens in context now / tokens at which
-# auto-compact fires, plain dim text (no tier tint — informational).
+# Context usage: "[ Ctx 12% / 467k ]" — share of the auto-compact budget in
+# use (integer, floored, clamped at 100% = compaction fires now) and the
+# budget itself, plain dim text (no tier tint — informational).
 # "Now" is what Claude Code's own trigger compares, not just the last usage:
 #   last response (input + cache_create + cache_read + OUTPUT tokens, from
 #   .context_window.current_usage)
@@ -55,20 +56,25 @@ fi
 #     (tool results, hook/system-reminder attachments) at the same chars/token
 #     rule the trigger uses: 3 chars/token (4 for pre-4.7 models), images 2000
 # Without the extra terms the badge reads ~2k low and compaction seems early.
+# No API response yet (fresh session, or right after a compaction) counts as
+# 0 + pending, again matching the trigger.
 # The threshold mirrors the /context autoCompactThreshold:
 #   threshold = min(model window, autoCompactWindow) - min(max_output, 20000) - 13000
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 read -r cx_used cx_win <<< "$(printf '%s' "$input" | jq -r '
   .context_window as $c
-  | if ($c | type) != "object" or ($c.current_usage | type) != "object" then "" else
-    ((($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
-      + ($c.current_usage.cache_read_input_tokens // 0) + ($c.current_usage.output_tokens // 0)) | floor | tostring)
-    + " " + (($c.context_window_size // 0) | floor | tostring) end' 2>/dev/null)"
+  | if ($c | type) != "object" or (($c.context_window_size // 0) | type) != "number" then "" else
+    (if ($c.current_usage | type) == "object" then
+       (($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
+        + ($c.current_usage.cache_read_input_tokens // 0) + ($c.current_usage.output_tokens // 0))
+     else 0 end | floor | tostring)
+    + " " + ($c.context_window_size | floor | tostring) end' 2>/dev/null)"
 # digits only past this point: any surprise (floats, "null", missing jq) hides the badge
 cx_used=$(printf '%s' "$cx_used" | tr -cd '0-9'); cx_win=$(printf '%s' "$cx_win" | tr -cd '0-9')
 if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_used}" -le 12 ] && [ "$cx_win" -gt 0 ]; then
-  # Pending tokens: transcript lines after the last assistant entry (tool
-  # results, attachments) estimated the way the trigger does. tac + early-exit
+  # Pending tokens: transcript lines after the last assistant entry or the
+  # last compaction boundary (tool results, attachments, a fresh prompt, the
+  # compaction summary) estimated the way the trigger does. tac + early-exit
   # awk reads only the tail, so a multi-MB transcript stays cheap.
   tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   if [ -n "$tp" ] && [ -f "$tp" ] && [ ! -L "$tp" ]; then
@@ -78,7 +84,9 @@ if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
       *claude-3-*|*claude-opus-4-[0156]|*claude-sonnet-4-[056]|*claude-haiku-4-5) cpt=4 ;;
       *) cpt=3 ;;
     esac
-    pend=$(tac "$tp" 2>/dev/null | awk '/"type":"assistant"/{exit} {print}' | jq -n -R --argjson cpt "$cpt" '
+    pend=$({ tac "$tp" 2>/dev/null || tail -r "$tp" 2>/dev/null; } \
+      | awk '/"type":"assistant"/ || /"subtype":"compact_boundary"/ {exit} {print}' \
+      | jq -n -R --argjson cpt "$cpt" '
       def est:
         if type == "string" then (length / $cpt | round)
         elif type == "array" then (map(
@@ -93,7 +101,7 @@ if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
         else (tojson | length / $cpt | round) end;
       reduce (inputs | fromjson? // empty) as $l (0;
         . + (if $l.type == "user" or $l.type == "assistant" then ($l.message.content | est)
-             elif $l.type == "attachment" then (($l.attachment.text // $l.attachment.content // null) | est)
+             elif $l.type == "attachment" then (($l.attachment.text // $l.attachment.content // $l.attachment.prompt // null) | est)
              else 0 end))' 2>/dev/null | tr -cd '0-9')
     [ -n "$pend" ] && [ "${#pend}" -le 12 ] && cx_used=$(( cx_used + pend ))
   fi
@@ -147,9 +155,12 @@ if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
     cx_thr=$cx_win
     suffix=" ∅ compact"
   fi
+  # integer percent, floored so 100% shows only once used >= threshold (the
+  # moment compaction fires); clamped because used can overshoot briefly
+  cx_pct=$(( cx_used * 100 / cx_thr )); [ "$cx_pct" -gt 100 ] && cx_pct=100
   # no tier tint: context is informational, not a limit — plain dim text
-  printf ' \033[1;38;5;252m[\033[0m \033[38;5;250mCtx\033[0m \033[38;5;245m%s/%s%s\033[0m \033[1;38;5;252m]\033[0m' \
-    "$(_tk "$cx_used")" "$(_tk "$cx_thr")" "$suffix"
+  printf ' \033[1;38;5;252m[\033[0m \033[38;5;250mCtx\033[0m \033[38;5;245m%d%% / %s%s\033[0m \033[1;38;5;252m]\033[0m' \
+    "$cx_pct" "$(_tk "$cx_thr")" "$suffix"
 fi
 
 # Claude usage limits: 5-hour + weekly (seven_day).
