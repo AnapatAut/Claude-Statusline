@@ -2,6 +2,92 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## Unreleased
+
+Re-verified against the Claude Code 2.1.310 bundle and cross-checked line by
+line against a reference port of its trigger on every local transcript.
+Tested in throwaway containers on Ubuntu 24.04 / 22.04, Debian 12, Alpine
+(busybox tools) and bash 3.2, with jq 1.6, 1.7 and 1.8.
+
+### Fixed
+- **Context count ran low by the last response's later blocks.** One API
+  response spans several transcript lines (thinking, text, tool_use). The
+  trigger anchors at the first of them and estimates the rest, but the tail
+  scan stopped at the last one, so large `tool_use` inputs (file writes,
+  long commands) went uncounted and compaction again seemed early.
+- **Synthetic and zero-usage assistant lines ended the scan.** API-error
+  stubs (`<synthetic>` model), interrupt and rejection stubs, unmetered
+  lines and the zero-usage messages kept after a compaction are skipped by
+  the trigger; the scan now skips them as anchors too and still estimates
+  their content.
+- **Per-model windows were ignored.** `/autocompact` now saves to
+  `modelSettings.<model>.autoCompactWindow`, which overrides the top-level
+  value; settings files are resolved in Claude Code's order (user, project,
+  local, managed), a top-level value resets lower per-model entries, and
+  `"auto"` means the model window. An object or out-of-range value used to
+  be read as a garbage number.
+- **`CLAUDE_CODE_AUTO_COMPACT_WINDOW=500k` read as 100k.** The env value is
+  now parsed like Claude Code does (`k` / `M` suffixes, decimals).
+- **Project settings were read from the current subdirectory** instead of
+  the project root (`.workspace.project_dir`).
+- **Huge token counts could read as tiny ones** (`1e20` stringified as
+  `1e+20` and was read back as 120). Out-of-range numbers now hide the badge.
+- A response in memory but not yet written to the transcript no longer
+  drops the badge to the pending estimate for one repaint.
+- `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT` now count as set only for
+  `1`/`true`/`yes`/`on`, as in Claude Code (any other non-empty value used to
+  disable the budget display).
+- **Symlinked settings files were ignored.** A `settings.json` managed by a
+  dotfiles tool (GNU stow, chezmoi, Nix home-manager) is a symlink, and the
+  badge skipped it, so `/autocompact` windows and `autoCompactEnabled: false`
+  in it had no effect on the budget shown. Symlinks are now followed, as
+  Claude Code does; a file over 2 MiB is skipped, also as Claude Code does.
+  Two sources that resolve to the same file are each applied again, which
+  only matters when another file sits between them in precedence.
+- **Install and uninstall replaced a symlinked `settings.json` with a plain
+  file**, cutting it loose from the dotfiles it pointed to. They now edit the
+  file the link points to, so the link survives. When that file is read-only
+  (Nix home-manager), they stop before changing anything and print what to
+  set in the settings source; install still updates the script if the
+  read-only file already has the statusline set up. A failed edit no longer
+  leaves a temp file behind.
+- **A FIFO, device or huge file could hang the statusline or exhaust memory.**
+  The plugin check, the global config and the credentials lookup handed
+  `settings.json`, `.claude.json` and `.credentials.json` straight to `jq`,
+  which blocks on a FIFO and reads `/dev/zero` or a huge sparse file without
+  end. Every config read now takes regular files only, size-capped with a
+  bounded read.
+- **The global config was read from `~` even with `CLAUDE_CONFIG_DIR` set.**
+  It is now `$CLAUDE_CONFIG_DIR/.claude.json` in that case, and a non-empty
+  legacy `.config.json` in the config dir takes precedence, as in Claude Code.
+- **Caveman badge disappeared with caveman 4.** Caveman 4.0.1 writes the
+  modes `caveman`, `ultracave` and `megacave`, which the whitelist did not
+  know, and keeps the mode per session in
+  `.caveman-sessions/<session_id>.mode`. The badge now reads the session file
+  first (falling back to `.caveman-active`), maps the new and legacy names
+  the way caveman's own statusline does, and hides on `off`.
+
+### Removed
+- **Caveman savings number** (`[ ⛏ 28.8M ]`). Caveman 4 dropped its savings
+  estimate (an unverified fixed ratio), reports savings as unknown and writes
+  no savings fields to its history. The badge now shows the mode only:
+  `[ ⛏ ]`, `[ ⛏ ULTRACAVE ]`, `[ ⛏ MEGACAVE ]`, `[ ⛏ COMMIT ]`.
+- **Stop-hook refresh chain** and `caveman-stats-refresh.sh`. `install.sh`
+  now removes the `Stop` hook entry and script an older install added (only
+  that entry; other hooks and caveman's own files are left alone); the
+  tarball ships three scripts. Left in place, that hook keeps running the
+  stale pre-4 `hooks/caveman-stats.js` after every turn, which appends
+  old-format rows to caveman's history that caveman 4 then reads as the
+  session's latest totals.
+
+### Added
+- Tokens the server cleared by context editing (`clear_tool_uses`) are added
+  back, as the trigger does; `usage.iterations` is honored; text documents
+  with a `.json` title count at 2 chars per token.
+- `autoCompactEnabled` falls back to the global config (`~/.claude.json`,
+  see Fixed for where it lives with `CLAUDE_CONFIG_DIR`); managed settings (`/etc/claude-code/managed-settings.json`, macOS
+  equivalent) are read.
+
 ## v1.2.0 — 2026-09-03 — Context badge as percent of compact budget
 
 ### Changed

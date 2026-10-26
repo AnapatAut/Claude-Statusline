@@ -7,6 +7,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 tar czf claude-statusline.tar.gz --transform 's,^,claude-statusline/,' \
-  statusline.sh install.sh uninstall.sh caveman-stats-refresh.sh
+  statusline.sh install.sh uninstall.sh
 echo "built: $(pwd)/claude-statusline.tar.gz"
 tar tzf claude-statusline.tar.gz

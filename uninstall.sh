@@ -1,7 +1,8 @@
 #!/bin/bash
-# Removes ONLY what install.sh added. Explicitly untouched: all other settings.json
-# keys (hooks, permissions, model, plugins...), credentials, caveman plugin files
-# (the statusline only ever read those), and anything else in ~/.claude.
+# Removes ONLY what install.sh added (including the caveman stats Stop hook entry
+# installs before v1.3.0 wired). Explicitly untouched: all other settings.json
+# keys and hooks (permissions, model, plugins...), credentials, caveman plugin
+# files (the statusline only ever read those), and anything else in ~/.claude.
 #
 # Safety rails:
 #   - settings.json: deletes just the statusLine key, and only if its command
@@ -20,16 +21,37 @@ SCRIPT="$CFG/statusline.sh"
 SRC="$(cd "$(dirname "$0")" && pwd)/statusline.sh"
 FORCE="${1:-}"
 
+# settings.json may be a symlink (GNU stow, chezmoi, Nix home-manager): edit the
+# file it points to, so the link survives. Plain readlink, one hop at a time
+# (macOS before 12.3 has no readlink -f).
+SETTINGS_W="$SETTINGS"; hops=0
+while [ -L "$SETTINGS_W" ] && [ "$hops" -lt 40 ]; do
+  t=$(readlink "$SETTINGS_W")
+  case "$t" in /*) SETTINGS_W="$t" ;; *) SETTINGS_W="$(dirname "$SETTINGS_W")/$t" ;; esac
+  hops=$((hops + 1))
+done
+if [ -L "$SETTINGS_W" ]; then echo "error: $SETTINGS is a symlink loop"; exit 1; fi
+# a read-only target (the Nix store) can't be edited here: stop before an edit,
+# so a rerun after fixing the settings source skips the edit and finishes
+_writable_or_stop() {
+  if [ ! -w "$SETTINGS_W" ] || [ ! -w "$(dirname "$SETTINGS_W")" ]; then
+    echo "error: can't edit $SETTINGS_W: read-only (managed by Nix home-manager or"
+    echo "  similar?). Remove $1 from the settings source instead, then rerun."
+    exit 1
+  fi
+}
+
 # 1. settings.json: drop only the statusLine key, only if it references our script
 if [ -f "$SETTINGS" ]; then
   cmd=$(jq -r '.statusLine.command // empty' "$SETTINGS")
   if [ -z "$cmd" ]; then
     echo "settings: no statusLine key, nothing to remove"
   elif printf '%s' "$cmd" | grep -qF "$SCRIPT" || [ "$FORCE" = "--force" ]; then
+    _writable_or_stop "the statusLine key"
     bak="$SETTINGS.pre-uninstall.$(date +%s)"
     cp "$SETTINGS" "$bak"
-    tmp=$(mktemp "$SETTINGS.XXXXXX")
-    jq 'del(.statusLine)' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    tmp=$(mktemp "$SETTINGS_W.XXXXXX")
+    jq 'del(.statusLine)' "$SETTINGS_W" > "$tmp" && mv "$tmp" "$SETTINGS_W" || { rm -f "$tmp"; exit 1; }
     echo "settings: statusLine key removed, every other key untouched (backup: $bak)"
   else
     echo "settings: statusLine points at a different command — left alone:"
@@ -56,20 +78,23 @@ else
   echo "script: $SCRIPT not found, skipping"
 fi
 
-# 3. caveman stats refresh chain (added by install when caveman was present):
+# 3. caveman stats refresh chain (added by installs before v1.3.0 when caveman
+#    was present; current installs remove it themselves):
 #    drop only Stop-hook entries whose command references our refresh script;
 #    all other hooks (SessionStart, UserPromptSubmit, unrelated Stop entries) stay
 if [ -f "$SETTINGS" ] && jq -e '[.hooks.Stop[]?.hooks[]?.command // empty] | any(contains("caveman-stats-refresh.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+  _writable_or_stop "the Stop hook entry that runs caveman-stats-refresh.sh"
   if [ -z "${bak:-}" ]; then  # not already backed up by the statusLine step
     bak="$SETTINGS.pre-uninstall.$(date +%s)"
     cp "$SETTINGS" "$bak"
     echo "settings backup: $bak"
   fi
-  tmp=$(mktemp "$SETTINGS.XXXXXX")
+  tmp=$(mktemp "$SETTINGS_W.XXXXXX")
   jq '
     .hooks.Stop = [.hooks.Stop[] | select(([.hooks[]?.command // empty] | any(contains("caveman-stats-refresh.sh"))) | not)]
     | if .hooks.Stop == [] then del(.hooks.Stop) else . end
-  ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    | if .hooks == {} then del(.hooks) else . end
+  ' "$SETTINGS_W" > "$tmp" && mv "$tmp" "$SETTINGS_W" || { rm -f "$tmp"; exit 1; }
   echo "settings: caveman stats Stop hook removed, other hooks untouched"
 fi
 rm -f "$CFG/hooks/caveman-stats-refresh.sh"

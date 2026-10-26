@@ -1,6 +1,6 @@
 #!/bin/bash
 # Custom Claude Code statusline — two lines:
-#   [ <model> <effort> ] [ Ctx <pct> / <threshold> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <saved> ] [ 🎀 <mode> ]
+#   [ <model> <effort> ] [ Ctx <pct> / <threshold> ] [ Session <pct> ↻ <reset> · Weekly <pct> ↻ <reset> ] [ ⛏ <mode> ] [ 🎀 <mode> ]
 #   <user>@<host>:<dir>
 #
 # Line 1 badges: model/effort, context usage vs the auto-compact threshold
@@ -10,9 +10,9 @@
 # green/blue PS1 palette so it never reads as a real shell prompt. Long paths
 # get a whole line, so they can't push the badges off-screen.
 #
-# The caveman badge mirrors caveman's own hooks/caveman-statusline.sh logic so its
-# mode whitelist + symlink/escape hardening stay the source of truth and keep
-# working across caveman updates.
+# The caveman badge mirrors caveman's own hooks/caveman-statusline.sh logic
+# (4.x: per-session mode files, caveman/ultracave/megacave modes) so its mode
+# whitelist + symlink/escape hardening stay the source of truth.
 
 input=$(cat)
 
@@ -49,61 +49,166 @@ fi
 # Context usage: "[ Ctx 12% / 467k ]" — share of the auto-compact budget in
 # use (integer, floored, clamped at 100% = compaction fires now) and the
 # budget itself, plain dim text (no tier tint — informational).
-# "Now" is what Claude Code's own trigger compares, not just the last usage:
-#   last response (input + cache_create + cache_read + OUTPUT tokens, from
-#   .context_window.current_usage)
-#   + estimate of everything appended to the transcript since that response
-#     (tool results, hook/system-reminder attachments) at the same chars/token
-#     rule the trigger uses: 3 chars/token (4 for pre-4.7 models), images 2000
-# Without the extra terms the badge reads ~2k low and compaction seems early.
-# No API response yet (fresh session, or right after a compaction) counts as
-# 0 + pending, again matching the trigger.
+# The count mirrors what Claude Code's own trigger compares (checked against
+# the 2.1.310 bundle), not just the last API usage:
+#   anchor = the last real API response in the transcript: skips synthetic
+#            (<synthetic> model, interrupt/rejection stubs), unmetered and
+#            all-zero-usage assistant lines; stops at a compact_boundary
+#            (anchor tokens 0). A response spans several transcript lines
+#            (thinking, text, tool_use), all sharing message.id; the anchor is
+#            the FIRST of them, so the later blocks count as pending too.
+#   tokens = anchor usage input + cache_create + cache_read + output (taken
+#            from usage.iterations when present), via
+#            .context_window.current_usage, which holds the same message
+#   + estimate of every line after the anchor (tool results, attachments,
+#     the response's later blocks) at the trigger's chars-per-token rule:
+#     3 (4 for pre-4.7 models), images 2000, json text documents 2
+#   + tokens the server cleared by context editing (clear_tool_uses), which
+#     the trigger adds back
+# No transcript, or a response not yet written to it: last usage alone. No
+# anchor (fresh session, right after a compaction): pending alone, again
+# matching the trigger.
 # The threshold mirrors the /context autoCompactThreshold:
 #   threshold = min(model window, autoCompactWindow) - min(max_output, 20000) - 13000
+# autoCompactWindow resolves like Claude Code's: env CLAUDE_CODE_AUTO_COMPACT_WINDOW
+# (200k / 1M / 500000 forms, clamped 100k..1M), else settings files low to
+# high (user < project < local < managed): a file that sets the top-level
+# value resets the per-model ones, modelSettings.<model>.autoCompactWindow
+# (what /autocompact saves) overrides it for this model; "auto" or unset =
+# the model window. A server-tuned "auto" window is not visible from here.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-read -r cx_used cx_win <<< "$(printf '%s' "$input" | jq -r '
+# A config file is read only if it is a regular file (symlinks followed) of at
+# most $2 bytes, the way Claude Code reads settings. head bounds the check
+# itself, so a FIFO, device or huge/sparse target can't hang or flood a render.
+_cfg_ok() {
+  [ -f "$1" ] || return 1
+  local n; n=$(head -c "$(( $2 + 1 ))" "$1" 2>/dev/null | wc -c | tr -cd '0-9')
+  [ -n "$n" ] && [ "$n" -le "$2" ]
+}
+read -r cx_base cx_win <<< "$(printf '%s' "$input" | jq -r '
+  # plain integers only: 1e20 would stringify as "1e+20" and read back as 120
+  def int: if type == "number" and (isinfinite | not) and . >= 0 and . < 1e12 then floor | tostring else null end;
   .context_window as $c
-  | if ($c | type) != "object" or (($c.context_window_size // 0) | type) != "number" then "" else
-    (if ($c.current_usage | type) == "object" then
-       (($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
-        + ($c.current_usage.cache_read_input_tokens // 0) + ($c.current_usage.output_tokens // 0))
-     else 0 end | floor | tostring)
-    + " " + ($c.context_window_size | floor | tostring) end' 2>/dev/null)"
+  | if ($c | type) != "object" then "" else
+    [ (if ($c.current_usage | type) == "object" then
+         (($c.current_usage.input_tokens // 0) + ($c.current_usage.cache_creation_input_tokens // 0)
+          + ($c.current_usage.cache_read_input_tokens // 0) + ($c.current_usage.output_tokens // 0)) | int
+       else "0" end),
+      ($c.context_window_size | int) ]
+    | if all(. != null) then join(" ") else "" end end' 2>/dev/null)"
 # digits only past this point: any surprise (floats, "null", missing jq) hides the badge
-cx_used=$(printf '%s' "$cx_used" | tr -cd '0-9'); cx_win=$(printf '%s' "$cx_win" | tr -cd '0-9')
-if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_used}" -le 12 ] && [ "$cx_win" -gt 0 ]; then
-  # Pending tokens: transcript lines after the last assistant entry or the
-  # last compaction boundary (tool results, attachments, a fresh prompt, the
-  # compaction summary) estimated the way the trigger does. tac + early-exit
-  # awk reads only the tail, so a multi-MB transcript stays cheap.
+cx_base=$(printf '%s' "$cx_base" | tr -cd '0-9'); cx_win=$(printf '%s' "$cx_win" | tr -cd '0-9')
+if [ -n "$cx_base" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_base}" -le 12 ] && [ "$cx_win" -gt 0 ]; then
+  # canonical model key, the way settings keys and the chars/token table match
+  # it: lowercase, "claude-..." onward (drops Bedrock/Vertex prefixes), no
+  # [1m] / @date / -v1:0 / -YYYYMMDD suffix, dots and underscores as dashes
+  mkey=$(printf '%s' "$input" | jq -r '
+    def norm: ascii_downcase | sub("\\[[^]]*\\]$"; "")
+      | (if test("claude-") then "claude-" + (split("claude-")[1:] | join("claude-")) else . end)
+      | sub("@.*$"; "") | sub("-v[0-9]+(:[0-9]+)?$"; "") | sub("-[0-9]{8}$"; "") | gsub("[._]"; "-");
+    .model.id // empty | norm' 2>/dev/null)
+  case "$mkey" in  # older models tokenize ~4 chars/token, everything newer 3
+    claude-3-*|claude-opus-4-[0156]|claude-sonnet-4-[056]|claude-haiku-4-5) cpt=4 ;;
+    *) cpt=3 ;;
+  esac
+  cx_used=$cx_base
+  # Pending tokens: walk the transcript backwards (tac, so only the tail is
+  # read; jq breaks out once the anchor's first line is behind it) and apply
+  # the trigger's estimator. Output: anchor-found tokens pending cleared.
   tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   if [ -n "$tp" ] && [ -f "$tp" ] && [ ! -L "$tp" ]; then
-    mid=$(printf '%s' "$input" | jq -r '.model.id // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr '._' '--')
-    mid=${mid##*/}; mid=${mid%\[1m\]}; mid=$(printf '%s' "$mid" | sed -E 's/-v[0-9]+(:[0-9]+)?$//; s/-[0-9]{8}$//')
-    case "$mid" in  # older models tokenize ~4 chars/token, everything newer 3
-      *claude-3-*|*claude-opus-4-[0156]|*claude-sonnet-4-[056]|*claude-haiku-4-5) cpt=4 ;;
-      *) cpt=3 ;;
-    esac
-    pend=$({ tac "$tp" 2>/dev/null || tail -r "$tp" 2>/dev/null; } \
-      | awk '/"type":"assistant"/ || /"subtype":"compact_boundary"/ {exit} {print}' \
-      | jq -n -R --argjson cpt "$cpt" '
+    scan=$({ tac "$tp" 2>/dev/null || tail -r "$tp" 2>/dev/null; } | jq -nr -R --argjson cpt "$cpt" '
+      def kd($r): if type == "string" then (length / $r | round) else 0 end;
+      def kd: kd($cpt);
+      def ext: (. // "" | tostring | split(".") | last // "" | ascii_downcase)
+        | if . == "json" or . == "jsonl" or . == "jsonc" then 2 else 4 end;
+      def zy:
+        def blk:
+          if type == "string" then kd
+          elif type != "object" then 0
+          elif .type == "text" then (.text | kd)
+          elif .type == "document" and (.source | type) == "object" and .source.type == "text" then
+            ([$cpt, (.title | ext)] | min) as $r | (.source.data | kd($r))
+          elif .type == "document" and (.source | type) == "object" and .source.type == "content" then
+            (.source.content | if type == "array" then map(select(type == "object")) | zy else kd end)
+          elif .type == "image" or .type == "document" then 2000
+          elif .type == "tool_result" then (.content | zy)
+          elif .type == "tool_use" then (((.name // "") | tostring) + ((.input // {}) | tojson) | kd)
+          elif .type == "thinking" then (.thinking | kd)
+          elif .type == "redacted_thinking" then (.data | kd)
+          else (tojson | kd) end;
+        if type == "string" then kd elif type == "array" then (map(blk) | add // 0) else 0 end;
       def est:
-        if type == "string" then (length / $cpt | round)
-        elif type == "array" then (map(
-            if type == "string" then (length / $cpt | round)
-            elif .type == "text" then ((.text // "") | length / $cpt | round)
-            elif .type == "image" or .type == "document" then 2000
-            elif .type == "tool_result" then (.content | est)
-            elif .type == "tool_use" then (((.name // "") + ((.input // {}) | tojson)) | length / $cpt | round)
-            elif .type == "thinking" then ((.thinking // "") | length / $cpt | round)
-            else (tojson | length / $cpt | round) end) | add // 0)
-        elif type == "null" then 0
-        else (tojson | length / $cpt | round) end;
-      reduce (inputs | fromjson? // empty) as $l (0;
-        . + (if $l.type == "user" or $l.type == "assistant" then ($l.message.content | est)
-             elif $l.type == "attachment" then (($l.attachment.text // $l.attachment.content // $l.attachment.prompt // null) | est)
-             else 0 end))' 2>/dev/null | tr -cd '0-9')
-    [ -n "$pend" ] && [ "${#pend}" -le 12 ] && cx_used=$(( cx_used + pend ))
+        if .type == "assistant" or .type == "user" or .type == "api_system" then (.message.content // null | zy)
+        elif .type == "attachment" and .attachment then
+          ((.attachment.text // .attachment.content // .attachment.prompt // null) | zy)
+        else 0 end;
+      def m7:  # usage as the trigger reads it: last real iteration when present
+        { i: (.input_tokens // 0), o: (.output_tokens // 0),
+          cc: (.cache_creation_input_tokens // 0), cr: (.cache_read_input_tokens // 0) } as $n
+        | if ($n.i + $n.cc + $n.cr) == 0 or (.iterations | type) != "array" then $n
+          else ([.iterations[] | select((type == "object" and (.type == "advisor_message" or .type == "compaction")) | not)] | last) as $s
+            | if ($s | type) == "object" and ($s.type == "message" or $s.type == "fallback_message")
+                 and ([$s.input_tokens, $s.output_tokens, $s.cache_creation_input_tokens, $s.cache_read_input_tokens] | all(type == "number"))
+              then { i: $s.input_tokens, o: $s.output_tokens, cc: $s.cache_creation_input_tokens, cr: $s.cache_read_input_tokens }
+              else $n end end;
+      def stub: (.message.content | type) == "array" and (.message.content[0] | type) == "object"
+        and .message.content[0].type == "text"
+        and (.message.content[0].text | IN("[Request interrupted by user]", "[Request interrupted by user for tool use]",
+             "No response requested.",
+             "The user doesn'"'"'t want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+             "The user doesn'"'"'t want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."));
+      def real: .type == "assistant" and (.message | type) == "object" and (.message.usage | type) == "object"
+        and .message.model != "<synthetic>" and .isUnmetered != true and (stub | not)
+        and (.message.usage | m7 | (.i + .cc + .cr) > 0);
+      def sbe: if .type == "assistant" and (.message | type) == "object" and (.message | has("id"))
+        and .message.model != "<synthetic>" then [.message.id] else null end;
+      def cleared:  # server context editing, added back by the trigger; null = look further back
+        if (.message.context_management | type) == "object" then
+          ([.message.context_management.applied_edits[]?
+            | select(type == "object" and .type == "clear_tool_uses_20250919" and (.cleared_input_tokens | type) == "number")
+            | .cleared_input_tokens] | add // 0)
+        elif .message.stop_reason != null then 0 else null end;
+      (last(label $out | foreach (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $l (
+        { pend: 0, tent: 0, id: null, last: 0, tok: 0, anc: false, cl: null, done: false };
+        if .done then .
+        elif .anc | not then
+          if $l.type == "system" and $l.subtype == "compact_boundary" then .done = true
+          elif ($l | real) then
+            ($l.message.usage | m7) as $u
+            | .anc = true | .tok = ($u.i + $u.cc + $u.cr + $u.o) | .cl = ($l | cleared)
+            | ($l | sbe) as $s
+            | if $s != null and ($s[0] | type) == "string" and ($s[0] | length) > 0
+              then .id = $s | .last = ($l | est) else .done = true end
+          else .pend += ($l | est) end
+        else
+          ($l | sbe) as $s
+          | if $s == .id then .pend += .tent + .last | .tent = 0 | .last = ($l | est)
+              | (if .cl == null and ($l | real) then .cl = ($l | cleared) else . end)
+            elif $s != null then .done = true
+            else .tent += ($l | est) end
+        end;
+        if .done then (., break $out) else . end))
+        // { anc: false, tok: 0, pend: 0 })   # empty transcript (last/1: null in jq 1.7, nothing in 1.8)
+      | [.tok, .pend, (.cl // 0)] as $v
+      | if ($v | all(type == "number" and . >= 0 and . < 1e12))
+        then "\(if .anc then 1 else 0 end) \($v[0]) \($v[1]) \($v[2])" else "" end' 2>/dev/null)
+    read -r s_anc s_tok s_pend s_cl <<< "$scan"
+    s_anc=$(printf '%s' "$s_anc" | tr -cd '0-9'); s_tok=$(printf '%s' "$s_tok" | tr -cd '0-9')
+    s_pend=$(printf '%s' "$s_pend" | tr -cd '0-9'); s_cl=$(printf '%s' "$s_cl" | tr -cd '0-9')
+    # empty transcript, no jq: keep the last usage alone
+    if [ -n "$s_anc" ] && [ -n "$s_pend" ] && [ "${#s_tok}" -le 12 ] && [ "${#s_pend}" -le 12 ] && [ "${#s_cl}" -le 12 ]; then
+      if [ "$s_anc" = 1 ]; then
+        # in-memory usage is fresher than the transcript; fall back to the
+        # transcript anchor when the last usage is zero (the trigger skips those)
+        [ "$cx_base" -gt 0 ] || cx_base=${s_tok:-0}
+        cx_used=$(( cx_base + s_pend + ${s_cl:-0} ))
+      elif [ "$cx_base" -eq 0 ]; then
+        cx_used=$s_pend  # fresh session or just compacted: only what follows counts
+      fi
+      # else: a response is in memory but not yet in the transcript; keep the
+      # last usage alone until the next repaint catches up
+    fi
   fi
   _tk() {  # tokens -> compact: 812 / 58k / 467k / 1.2M
     local n=$1
@@ -113,42 +218,75 @@ if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
     elif [ "$n" -ge 1000 ]; then printf '%dk' $(( (n + 500) / 1000 ))
     else printf '%d' "$n"; fi
   }
-  _truthy() {  # env flag set the way Claude Code reads it (1/true/yes/on); 0/false/no/off/"" = unset
-    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in ''|0|false|no|off) return 1 ;; *) return 0 ;; esac
+  _truthy() {  # env flag the way Claude Code reads it: only 1/true/yes/on, case and spaces ignored
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac
   }
-  # autoCompactEnabled / autoCompactWindow from settings, most specific scope
-  # wins per key: project local > project > user. One jq per existing file;
-  # a malformed file is skipped, not fatal. `false` must survive, so no `//`.
-  ac_en=""; ac_win=""
-  for f in "$cwd/.claude/settings.local.json" "$cwd/.claude/settings.json" "$CFG/settings.json"; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    IFS=$'\x1f' read -r e w <<< "$(jq -r '
-      def v(k): if has(k) and .[k] != null then (.[k] | tostring) else "" end;
-      if type == "object" then [v("autoCompactEnabled"), v("autoCompactWindow")] | join("") else "" end
-    ' "$f" 2>/dev/null)"
-    [ -z "$ac_en" ]  && ac_en=$e
-    [ -z "$ac_win" ] && ac_win=$(printf '%s' "$w" | tr -cd '0-9')
-    [ -n "$ac_en" ] && [ -n "$ac_win" ] && break
+  # Settings, lowest precedence first. Project files live at the project root,
+  # not the current subdir. Each source is applied even when two resolve to
+  # the same file (project dir = ~), as Claude Code does.
+  pdir=$(printf '%s' "$input" | jq -r '.workspace.project_dir // .cwd // empty' 2>/dev/null)
+  [ -n "$pdir" ] || pdir=$cwd
+  ac_en=""; ac_def=""; ac_mod=""
+  for f in "$CFG/settings.json" "$pdir/.claude/settings.json" "$pdir/.claude/settings.local.json" \
+           /etc/claude-code/managed-settings.json "/Library/Application Support/ClaudeCode/managed-settings.json"; do
+    # Like Claude Code's reader: symlinks are followed (dotfile managers, Nix
+    # home-manager), and a file over 2 MiB is not read. Only whitelisted
+    # values come out below, nothing raw.
+    _cfg_ok "$f" 2097152 || continue
+    # "<enabled>\x1f<top-level window>\x1f<this model's window>"; a window is an
+    # integer 100k..1M, "auto", "-" when the file leaves it unset; invalid = unset
+    IFS=$'\x1f' read -r e top mod <<< "$(jq -r --arg k "$mkey" '
+      def norm: ascii_downcase | sub("\\[[^]]*\\]$"; "")
+        | (if test("claude-") then "claude-" + (split("claude-")[1:] | join("claude-")) else . end)
+        | sub("@.*$"; "") | sub("-v[0-9]+(:[0-9]+)?$"; "") | sub("-[0-9]{8}$"; "") | gsub("[._]"; "-");
+      def win: if . == "auto" then "auto"
+        elif type == "number" and . == floor and . >= 100000 and . <= 1000000 then tostring else "-" end;
+      if type != "object" then "" else
+        [ (.autoCompactEnabled | if type == "boolean" then tostring else "" end),
+          (.autoCompactWindow // null | if . == null then "-" else win end),
+          ((.modelSettings // {}) | if type != "object" or $k == "" then "-" else
+             [to_entries[] | select((.value | type) == "object" and (.value.autoCompactWindow != null) and (.key | norm) == $k)]
+             | ((map(select(.key == $k)) | first) // first) | if . == null then "-" else (.value.autoCompactWindow | win) end end)
+        ] | join("\u001f") end' "$f" 2>/dev/null)"
+    [ -n "$e" ] && ac_en=$e
+    if [ -n "$top" ] && [ "$top" != - ]; then ac_def=$top; ac_mod=""; fi   # top-level resets per-model
+    [ -n "$mod" ] && [ "$mod" != - ] && ac_mod=$mod
   done
+  # legacy global config: $CFG/.config.json when non-empty, else .claude.json
+  # in CLAUDE_CONFIG_DIR (or ~ when unset), the file Claude Code itself picks
+  gcf="$CFG/.config.json"
+  [ -f "$gcf" ] && [ -s "$gcf" ] || gcf="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+  if [ -z "$ac_en" ] && _cfg_ok "$gcf" 16777216; then
+    ac_en=$(jq -r '.autoCompactEnabled | if type == "boolean" then tostring else "" end' "$gcf" 2>/dev/null)
+  fi
   cx_on=1
   [ "$ac_en" = false ] && cx_on=0
   { _truthy "${DISABLE_AUTO_COMPACT:-}" || _truthy "${DISABLE_COMPACT:-}"; } && cx_on=0
   if [ "$cx_on" = 1 ]; then
-    # window: env (Claude Code accepts 100k..1M) > settings > model window; never above model window
-    acw=$(printf '%s' "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" | tr -cd '0-9' | head -c 12)
-    if [ -n "$acw" ]; then
-      [ "$acw" -lt 100000 ] && acw=100000
-      [ "$acw" -gt 1000000 ] && acw=1000000
+    acw=""
+    if [ -n "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
+      # Claude Code's size parser: 200k / 1.5M / 500000; below 100k -> 100k,
+      # above 1M -> 1M, unparsable -> ignored
+      acw=$(jq -nr --arg s "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" '
+        ($s | gsub("^\\s+|\\s+$"; "")) as $r | ($r[-1:] | ascii_downcase) as $u
+        | (if $u == "m" or $u == "k" then ($r[:-1] | tonumber? // null) | (if . == null then null
+             else . * (if $u == "m" then 1000000 else 1000 end) end)
+           else ($r | tonumber? // null) end) as $w
+        | if $w == null or ($w | isnan) or $w < 1 then ""
+          elif $w < 100000 then 100000 elif $w > 1000000 then 1000000 else ($w | round) end' 2>/dev/null | tr -cd '0-9')
     fi
-    [ -z "$acw" ] && acw=$(printf '%s' "$ac_win" | head -c 12)
+    if [ -z "$acw" ]; then
+      acw=${ac_mod:-$ac_def}
+      [ "$acw" = auto ] && acw=""
+    fi
     { [ -z "$acw" ] || [ "$acw" -gt "$cx_win" ]; } && acw=$cx_win
     mo=$(printf '%s' "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" | tr -cd '0-9' | head -c 12)
     { [ -z "$mo" ] || [ "$mo" -gt 20000 ]; } && mo=20000
     cx_thr=$(( acw - mo - 13000 ))
-    pct_ov=$(printf '%s' "${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-}" | tr -cd '0-9' | head -c 3)
-    if [ -n "$pct_ov" ] && [ "$pct_ov" -gt 0 ] && [ "$pct_ov" -le 100 ]; then
-      t2=$(( (acw - mo) * pct_ov / 100 )); [ "$t2" -lt "$cx_thr" ] && cx_thr=$t2
-    fi
+    # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (0 < pct <= 100, decimals allowed) can only lower it
+    t2=$(awk -v p="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-}" -v e="$(( acw - mo ))" \
+      'BEGIN { if (p ~ /^[ \t]*[0-9]*\.?[0-9]+/ && p + 0 > 0 && p + 0 <= 100) printf "%d", int(e * (p / 100)) }' 2>/dev/null)
+    [ -n "$t2" ] && [ "$t2" -lt "$cx_thr" ] && cx_thr=$t2
     [ "$cx_thr" -lt 1 ] && cx_thr=1
     suffix=""
   else
@@ -164,7 +302,7 @@ if [ -n "$cx_used" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
 fi
 
 # Claude usage limits: 5-hour + weekly (seven_day).
-# Color by threshold (>=90 red, >=70 amber, else blue-grey) + compact reset countdown.
+# Color by tier (<50 green, 50-74 blue, 75-89 yellow, >=90 red) + compact reset countdown.
 # All sessions show identical values by reading ONE shared store, refreshed from
 # the OAuth usage endpoint on wall-clock 30s boundaries (xx:00 / xx:30) so they
 # update in lockstep regardless of when each session opened. No explicit
@@ -188,7 +326,9 @@ if [ "$need" = 1 ]; then
   LOCK="$SHARED.lock"
   [ -d "$LOCK" ] && [ $(( now_s - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) )) -ge 10 ] && rmdir "$LOCK" 2>/dev/null
   if mkdir "$LOCK" 2>/dev/null; then
-    tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
+    tok=""
+    _cfg_ok "$CFG/.credentials.json" 1048576 \
+      && tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
     if [ -n "$tok" ]; then
       lim=$(curl -sS -m 2 -H "Authorization: Bearer $tok" \
         -H "anthropic-beta: oauth-2025-04-20" \
@@ -249,47 +389,44 @@ fi
 # Badges show only while their plugin is still enabled: disabling a plugin
 # stops its hooks but leaves the old flag file behind, so the flag alone
 # would keep a dead badge on screen forever.
-_plugin_on() {  # ponytail: user-scope settings.json only; per-project enable/disable not checked
-  jq -e --arg p "$1" '.enabledPlugins[$p] != false' "$CFG/settings.json" >/dev/null 2>&1
+_uset_ok=""
+_plugin_on() {  # user-scope settings.json only; per-project enable/disable not checked
+  [ -n "$_uset_ok" ] || { _cfg_ok "$CFG/settings.json" 2097152 && _uset_ok=1 || _uset_ok=0; }
+  [ "$_uset_ok" = 1 ] && jq -e --arg p "$1" '.enabledPlugins[$p] != false' "$CFG/settings.json" >/dev/null 2>&1
 }
 
-# caveman badge: one bracket "[ ⛏ MODE saved (pct) ]".
-#   full  -> [ ⛏ 28.8M ]        (no MODE label)
-#   ultra -> [ ⛏ ULTRA 28.8M ]
-#   lite  -> [ ⛏ LITE ]         (number suppressed — lite has no benchmark)
-# Mode read from caveman's flag with its hardening (symlink-refuse, size-cap, whitelist).
-FLAG="$CFG/.caveman-active"
+# caveman badge: one bracket "[ ⛏ MODE ]", mode only. Caveman 4 dropped its
+# savings estimate (an unverified fixed ratio), so there is no number to show.
+#   caveman (and legacy lite/full)          -> [ ⛏ ]           (no MODE label)
+#   ultracave (legacy ultra)                -> [ ⛏ ULTRACAVE ]
+#   megacave (legacy wenyan, wenyan-*)      -> [ ⛏ MEGACAVE ]
+#   commit / review / compress              -> [ ⛏ COMMIT ] ...
+#   off, unknown, missing                   -> no badge
+# Mode comes from this session's file (.caveman-sessions/<session_id>.mode),
+# else the machine-wide .caveman-active, with caveman's own hardening:
+# session id alphabet + length check (it becomes a path), symlink refusal,
+# 64-byte cap, [a-z0-9-] only, whitelist.
 mode=""
-if [ -f "$FLAG" ] && [ ! -L "$FLAG" ] && _plugin_on caveman@caveman; then
-  mode=$(head -c 32 "$FLAG" 2>/dev/null | tr -d '\n\r' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z-')
-  case "$mode" in
-    lite|full|ultra|wenyan-lite|wenyan|wenyan-full|wenyan-ultra|commit|review|compress) ;;
-    *) mode="" ;;
-  esac
-fi
-if [ -n "$mode" ]; then
-  # est. tokens saved + % (high-water per session) from caveman history
-  sav=""
-  HIST="$CFG/.caveman-history.jsonl"
-  if [ -f "$HIST" ] && [ ! -L "$HIST" ]; then
-    sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
-    sav=$(jq -rs --arg sid "$sid" '
-      map(select($sid != "" and .session_id == $sid))
-      | (group_by(.session_id) | map(max_by(.est_saved_tokens // 0))) as $L
-      | ($L | map(.est_saved_tokens // 0) | add // 0) as $s
-      | ($L | map(.output_tokens // 0) | add // 0) as $o
-      | if $s > 0 then
-          (if $s >= 1000000 then (($s/1000000*10|round)/10|tostring)+"M"
-           elif $s >= 1000 then (($s/1000*10|round)/10|tostring)+"k"
-           else ($s|tostring) end)
-        else "" end
-    ' "$HIST" 2>/dev/null)
+if _plugin_on caveman@caveman; then
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) sid="" ;; esac
+  [ "${#sid}" -gt 128 ] && sid=""
+  FLAG="$CFG/.caveman-active"
+  [ -n "$sid" ] && [ -f "$CFG/.caveman-sessions/$sid.mode" ] && FLAG="$CFG/.caveman-sessions/$sid.mode"
+  if [ -f "$FLAG" ] && [ ! -L "$FLAG" ]; then
+    mode=$(head -c 64 "$FLAG" 2>/dev/null | tr -d '\n\r' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
   fi
-  label=""; [ "$mode" != full ] && label=$(printf '%s' "$mode" | tr '[:lower:]' '[:upper:]')
-  [ "$mode" = lite ] && sav=""          # lite: label only, no token number
+fi
+label="-"
+case "$mode" in
+  caveman|lite|full) label="" ;;
+  ultracave|ultra) label="ULTRACAVE" ;;
+  megacave|wenyan|wenyan-lite|wenyan-full|wenyan-ultra) label="MEGACAVE" ;;
+  commit|review|compress) label=$(printf '%s' "$mode" | tr '[:lower:]' '[:upper:]') ;;
+esac
+if [ "$label" != - ]; then
   inner="⛏"
   [ -n "$label" ] && inner="$inner $label"
-  [ -n "$sav" ]   && inner="$inner $sav"
   # grey brackets (match limits) + orange caveman content
   printf ' \033[1;38;5;252m[\033[0m \033[38;5;172m%s\033[0m \033[1;38;5;252m]\033[0m' "$inner"
 fi
@@ -323,5 +460,5 @@ fi
 printf '\n\033[1;38;5;80m%s@%s\033[0m:\033[1;38;5;110m%s\033[0m' "$user" "$host" "$dir"
 
 # Always succeed — Claude Code suppresses the statusline if the command exits non-zero
-# (e.g. a new session has no savings yet, so the trailing `&& printf` above is false).
+# (e.g. the trailing `&& printf` of an absent badge leaves a false status behind).
 exit 0
