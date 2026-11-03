@@ -2,6 +2,13 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.3.1 — 2026-11-03 — Executable install.sh
+
+### Fixed
+- **`./install.sh` failed with "Permission denied".** The script was never
+  marked executable in git, so it shipped without the execute bit in every
+  release tarball. It is executable now; `bash install.sh` also works.
+
 ## v1.3.0 — 2026-11-03 — Context count matches Claude Code 2.1.317; caveman 4 badge
 
 Re-verified against the Claude Code 2.1.317 bundle (first against 2.1.310)
