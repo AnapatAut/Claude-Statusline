@@ -50,7 +50,7 @@ fi
 # use (integer, floored, clamped at 100% = compaction fires now) and the
 # budget itself, plain dim text (no tier tint — informational).
 # The count mirrors what Claude Code's own trigger compares (checked against
-# the 2.1.310 bundle), not just the last API usage:
+# the 2.1.317 bundle), not just the last API usage:
 #   anchor = the last real API response in the transcript: skips synthetic
 #            (<synthetic> model, interrupt/rejection stubs), unmetered and
 #            all-zero-usage assistant lines; stops at a compact_boundary
@@ -64,7 +64,7 @@ fi
 #     the response's later blocks) at the trigger's chars-per-token rule:
 #     3 (4 for pre-4.7 models), images 2000, json text documents 2
 #   + tokens the server cleared by context editing (clear_tool_uses), which
-#     the trigger adds back
+#     the trigger adds back, capped at the client's own estimate when sent
 # No transcript, or a response not yet written to it: last usage alone. No
 # anchor (fresh session, right after a compaction): pending alone, again
 # matching the trigger.
@@ -107,8 +107,8 @@ if [ -n "$cx_base" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
       | (if test("claude-") then "claude-" + (split("claude-")[1:] | join("claude-")) else . end)
       | sub("@.*$"; "") | sub("-v[0-9]+(:[0-9]+)?$"; "") | sub("-[0-9]{8}$"; "") | gsub("[._]"; "-");
     .model.id // empty | norm' 2>/dev/null)
-  case "$mkey" in  # older models tokenize ~4 chars/token, everything newer 3
-    claude-3-*|claude-opus-4-[0156]|claude-sonnet-4-[056]|claude-haiku-4-5) cpt=4 ;;
+  case "$mkey" in  # older models (and no model id) ~4 chars/token, everything newer 3
+    ''|claude-3-*|claude-opus-4-[0156]|claude-sonnet-4-[056]|claude-haiku-4-5) cpt=4 ;;
     *) cpt=3 ;;
   esac
   cx_used=$cx_base
@@ -149,7 +149,8 @@ if [ -n "$cx_base" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
         | if ($n.i + $n.cc + $n.cr) == 0 or (.iterations | type) != "array" then $n
           else ([.iterations[] | select((type == "object" and (.type == "advisor_message" or .type == "compaction")) | not)] | last) as $s
             | if ($s | type) == "object" and ($s.type == "message" or $s.type == "fallback_message")
-                 and ([$s.input_tokens, $s.output_tokens, $s.cache_creation_input_tokens, $s.cache_read_input_tokens] | all(type == "number"))
+                 and ([$s.input_tokens, $s.output_tokens, $s.cache_creation_input_tokens, $s.cache_read_input_tokens] | all(type == "number" and . >= 0))
+                 and ($s.input_tokens + $s.cache_creation_input_tokens + $s.cache_read_input_tokens) > 0
               then { i: $s.input_tokens, o: $s.output_tokens, cc: $s.cache_creation_input_tokens, cr: $s.cache_read_input_tokens }
               else $n end end;
       def stub: (.message.content | type) == "array" and (.message.content[0] | type) == "object"
@@ -165,9 +166,12 @@ if [ -n "$cx_base" ] && [ -n "$cx_win" ] && [ "${#cx_win}" -le 12 ] && [ "${#cx_
         and .message.model != "<synthetic>" then [.message.id] else null end;
       def cleared:  # server context editing, added back by the trigger; null = look further back
         if (.message.context_management | type) == "object" then
-          ([.message.context_management.applied_edits[]?
-            | select(type == "object" and .type == "clear_tool_uses_20250919" and (.cleared_input_tokens | type) == "number")
+          .message.context_management.client_estimated_cleared_input_tokens as $c  # 2.1.317 caps at it
+          | ([.message.context_management.applied_edits[]?
+            | select(type == "object" and .type == "clear_tool_uses_20250919" and (.cleared_input_tokens | type) == "number"
+                     and .cleared_input_tokens >= 0)
             | .cleared_input_tokens] | add // 0)
+          | if ($c | type) == "number" and $c >= 0 and $c < . then $c else . end
         elif .message.stop_reason != null then 0 else null end;
       (last(label $out | foreach (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $l (
         { pend: 0, tent: 0, id: null, last: 0, tok: 0, anc: false, cl: null, done: false };

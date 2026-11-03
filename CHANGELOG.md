@@ -2,10 +2,11 @@
 
 All notable changes to the custom Claude Code statusline.
 
-## Unreleased
+## v1.3.0 — 2026-11-03 — Context count matches Claude Code 2.1.317; caveman 4 badge
 
-Re-verified against the Claude Code 2.1.310 bundle and cross-checked line by
-line against a reference port of its trigger on every local transcript.
+Re-verified against the Claude Code 2.1.317 bundle (first against 2.1.310)
+and cross-checked line by line against a reference port of its trigger on
+every local transcript.
 Tested in throwaway containers on Ubuntu 24.04 / 22.04, Debian 12, Alpine
 (busybox tools) and bash 3.2, with jq 1.6, 1.7 and 1.8.
 
@@ -66,6 +67,12 @@ Tested in throwaway containers on Ubuntu 24.04 / 22.04, Debian 12, Alpine
   `.caveman-sessions/<session_id>.mode`. The badge now reads the session file
   first (falling back to `.caveman-active`), maps the new and legacy names
   the way caveman's own statusline does, and hides on `off`.
+- **Claude Code 2.1.317 count changes.** Cleared context-editing tokens are
+  capped at `client_estimated_cleared_input_tokens` when a response carries
+  it, negative cleared values are ignored, and a `usage.iterations` entry
+  counts only when its values are non-negative and its input total is above
+  zero (otherwise the top-level usage is used). With no model id the
+  estimate uses 4 chars per token, as Claude Code does.
 
 ### Removed
 - **Caveman savings number** (`[ ⛏ 28.8M ]`). Caveman 4 dropped its savings

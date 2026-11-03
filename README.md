@@ -13,7 +13,7 @@ user@host:~/some/long/project/dir
   clamped, so `100%` shows exactly when compaction fires and never before
   (`99%` means within 1%, about 4.7k tokens, of it). Plain dim text, no tier
   colors: context is informational, not a limit. Checked against the
-  Claude Code 2.1.310 bundle.
+  Claude Code 2.1.317 bundle.
   - **Count** — what Claude Code's compaction trigger compares, not just the
     last API usage. The anchor is the last real API response in the
     transcript (synthetic, interrupt-stub, unmetered and zero-usage lines are
@@ -23,7 +23,8 @@ user@host:~/some/long/project/dir
     from `usage.iterations` when present) + an estimate of every line after
     the anchor, at the trigger's own rule (3 chars per token, 4 for pre-4.7
     models; images 2000; JSON text documents 2) + tokens the server cleared
-    by context editing, which the trigger adds back. The transcript is walked
+    by context editing, which the trigger adds back (capped at the client's
+    own estimate when the response carries one). The transcript is walked
     backwards with `tac` and the walk stops at the anchor, so large
     transcripts stay cheap.
   - **Budget** — mirrors the `/context` auto-compact threshold:
