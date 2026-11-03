@@ -57,6 +57,8 @@ user@host:~/some/long/project/dir
     usage without output tokens or pending lines, and its percentage is of
     the full window, not the compact budget.
 - **Session / Weekly limits** — color tiers (<50 green, 50–74 blue, 75–89 yellow, ≥90 red), compact reset countdown (`2d7h` → `3h53m` → `29m` as reset nears).
+  Shows only the windows the account reports: both, Session only, Weekly
+  only, or no badge at all (API-key setups report none).
   All sessions read one shared store refreshed from the OAuth usage endpoint on
   wall-clock 30s boundaries (xx:00/xx:30), so every session shows identical values
   and they update in lockstep. Single-flight lock: exactly one GET per boundary no
@@ -109,6 +111,9 @@ release, or rebuild consistently with:
 ```sh
 ./make-tarball.sh
 ```
+
+Re-checking against a new Claude Code version, plugin updates and the release
+steps: see [MAINTAINING.md](MAINTAINING.md).
 
 ## Install
 
