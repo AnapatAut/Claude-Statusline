@@ -99,6 +99,12 @@ Each of these is described in the header comment of the context block in
   session would retry.
 - The token must never appear on a command line (`ps` shows it to every local
   user): pass it to `curl` on stdin with `-H @-`.
+- Account switches: the store's 5th field and the `.tried` marker hold a stamp
+  of `.credentials.json` (inode, size, mtime in ns, digits and dots only, taken
+  before the token is read). Show stored numbers only when their stamp matches
+  the file now; fetch once at once when the stamp differs from the last
+  attempt's. Compare for "different", not "newer": a swap tool using `cp -p`
+  restores an older mtime.
 - Plan for a shared fetcher that other tools can use (`claude-usage`, its own
   repo, a soft dependency): kept outside this repo for now.
 

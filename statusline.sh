@@ -316,17 +316,28 @@ fi
 # stale, so the boundary check fires on the first render — instant limits
 # either way. Never more than one fetch per 5s. Harness rate_limits is fallback
 # only — per-session snapshots diverge, which the shared store exists to avoid.
+# Account switches: the store is tagged with a stamp of .credentials.json
+# (inode, size, mtime to the nanosecond) taken before the token is read. Numbers
+# whose stamp differs from the file now are never shown (another account's, or
+# from before a logout), and new credentials get one immediate fetch.
 SHARED="$CFG/.statusline-limits-fetch"
-TRIED="$SHARED.tried"   # time of the last attempt, success or not
+TRIED="$SHARED.tried"   # last attempt: its time, and the credentials stamp it used
+CREDS="$CFG/.credentials.json"
+cstamp=""   # empty = no credentials file (logged out, or Keychain only)
+[ -f "$CREDS" ] && cstamp=$(stat -L -c '%i.%s.%y' "$CREDS" 2>/dev/null | tr -cd '0-9.')
+[ -f "$CREDS" ] && [ -z "$cstamp" ] && cstamp=0   # stat failed: no switch detection
 now_s=$(date +%s)
 last=0
 [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && last=$(stat -c %Y "$SHARED" 2>/dev/null || echo 0)
+tstamp=""
 if [ -f "$TRIED" ] && [ ! -L "$TRIED" ]; then
   t=$(stat -c %Y "$TRIED" 2>/dev/null || echo 0)
   [ "$t" -gt "$last" ] && last=$t
+  tstamp=$(head -c 128 "$TRIED" 2>/dev/null | tr -cd '0-9.')
 fi
 need=0
 [ $(( now_s / 30 )) -gt $(( last / 30 )) ] && need=1   # crossed a :00/:30 boundary since last fetch
+[ -n "$cstamp" ] && [ "$cstamp" != "$tstamp" ] && need=1   # credentials not tried yet
 [ $(( now_s - last )) -lt 5 ] && need=0                # min 5s between fetches
 lim=""
 if [ "$need" = 1 ]; then
@@ -339,7 +350,7 @@ if [ "$need" = 1 ]; then
     # record the attempt first: a failed fetch (429, timeout, no token) then
     # waits for the next boundary like a successful one, instead of every
     # redraw of every session retrying
-    [ -L "$TRIED" ] || { (umask 077; touch "$TRIED") 2>/dev/null; }
+    [ -L "$TRIED" ] || { (umask 077; printf '%s' "$cstamp" > "$TRIED") && chmod 600 "$TRIED"; } 2>/dev/null
     tok=""
     _cfg_ok "$CFG/.credentials.json" 1048576 \
       && tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
@@ -358,15 +369,18 @@ if [ "$need" = 1 ]; then
         # owner-only (mktemp makes it 0600) and swapped in whole, so a redraw
         # never reads a half-written store
         tmp=$(mktemp "$SHARED.XXXXXX" 2>/dev/null) && {
-          printf '%s' "$lim" > "$tmp" && mv -f "$tmp" "$SHARED" || rm -f "$tmp"
+          printf '%s\037%s' "$lim" "$cstamp" > "$tmp" && mv -f "$tmp" "$SHARED" || rm -f "$tmp"
         } 2>/dev/null
       fi
     fi
     rmdir "$LOCK" 2>/dev/null
   fi
 fi
-if ! printf '%s' "$lim" | grep -q '[0-9]' && [ -f "$SHARED" ] && [ ! -L "$SHARED" ]; then
-  lim=$(head -c 256 "$SHARED" 2>/dev/null | tr -cd '0-9.\037')
+if ! printf '%s' "$lim" | grep -q '[0-9]' && [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && [ -n "$cstamp" ]; then
+  # 5th field: the credentials stamp the numbers were fetched with; a store
+  # without one (v1.3.2) or with another stamp belongs to other credentials
+  IFS=$'\x1f' read -r s1 s2 s3 s4 sst <<< "$(head -c 256 "$SHARED" 2>/dev/null | tr -cd '0-9.\037')"
+  [ "$sst" = "$cstamp" ] && lim=$(printf '%s\037%s\037%s\037%s' "$s1" "$s2" "$s3" "$s4")
 fi
 if ! printf '%s' "$lim" | grep -q '[0-9]'; then
   # endpoint unreachable and no store yet -> harness data (may lag this session)

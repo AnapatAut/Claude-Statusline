@@ -2,6 +2,25 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.3.3 — 2026-11-17 — Usage limits follow account switches
+
+### Fixed
+- **After an account switch the badge showed the previous account's usage.**
+  The store belonged to the config folder, not the account, so after `/login`
+  as someone else (or a tool swapping `.credentials.json`) the old numbers
+  stayed up to the next :00/:30 fetch, and indefinitely if that fetch failed.
+  The store now carries a stamp of the credentials file it was fetched with
+  (inode, size, modification time); numbers with another stamp are never
+  shown, and new credentials get one fetch at once (still single-flight, still
+  at most one try per stamp, then the usual 30 s pace). Until it lands, the
+  badge uses Claude Code's own `rate_limits`. Detected: `/login`, `mv`, `cp`,
+  `cp -p` (older mtime), in-place rewrites and symlinked credentials. A token
+  refresh by Claude Code counts as a change too: one extra fetch.
+- **After a logout the last numbers stayed on screen.** With no credentials
+  file the store is now hidden.
+- The attempt marker is forced to `0600` even if an older one had another mode.
+- A v1.3.2 store (no stamp) is ignored once and fetched again at once.
+
 ## v1.3.2 — 2026-11-17 — Usage fetch: token off the command line, failure backoff
 
 ### Security

@@ -66,7 +66,13 @@ user@host:~/some/long/project/dir
   timeout) also waits for the next boundary, so an outage never turns into a
   retry storm; the last numbers stay on screen meanwhile. The OAuth token goes to
   `curl` on stdin, never on its command line, and the store is owner-only
-  (`0600`), replaced whole on each write. First session after
+  (`0600`), replaced whole on each write. Account switches (`/login`, or a tool
+  that swaps `.credentials.json`): the stored numbers are tagged with the
+  credentials they were fetched with and never shown for others; new credentials
+  get one fetch at once, and until it lands the badge uses Claude Code's own
+  `rate_limits`. After a logout the store is hidden. The badge follows the
+  account in `.credentials.json`; a session still holding an older account in
+  memory shows that file's account. First session after
   idle fetches on open (instant limits). Expired windows display 0% instead of
   stale pre-reset numbers. Statusline repaints every 5s; a render costs about
   0.15s of CPU, so roughly 3% of one core per open session.
