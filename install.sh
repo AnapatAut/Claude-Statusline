@@ -59,7 +59,8 @@ chmod +x "$CFG/statusline.sh"
 # format that the current 0x1f-separated parser would misread once (garbage
 # Session%/Weekly% on the first render) before the next 30s fetch overwrites it.
 # Removing it forces a clean refetch in the new format.
-rm -rf "$CFG/.statusline-limits-fetch" "$CFG/.statusline-limits-fetch.lock" 2>/dev/null || true
+rm -rf "$CFG/.statusline-limits-fetch" "$CFG/.statusline-limits-fetch.lock" \
+  "$CFG/.statusline-limits-fetch.tried" 2>/dev/null || true
 
 if [ "$SETTINGS_RO" = 0 ]; then
   [ -f "$SETTINGS_W" ] || echo '{}' > "$SETTINGS_W"

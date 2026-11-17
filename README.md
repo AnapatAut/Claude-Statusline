@@ -62,7 +62,11 @@ user@host:~/some/long/project/dir
   All sessions read one shared store refreshed from the OAuth usage endpoint on
   wall-clock 30s boundaries (xx:00/xx:30), so every session shows identical values
   and they update in lockstep. Single-flight lock: exactly one GET per boundary no
-  matter how many sessions are open; min 5s between fetches. First session after
+  matter how many sessions are open; min 5s between fetches. A failed fetch (429,
+  timeout) also waits for the next boundary, so an outage never turns into a
+  retry storm; the last numbers stay on screen meanwhile. The OAuth token goes to
+  `curl` on stdin, never on its command line, and the store is owner-only
+  (`0600`), replaced whole on each write. First session after
   idle fetches on open (instant limits). Expired windows display 0% instead of
   stale pre-reset numbers. Statusline repaints every 5s; a render costs about
   0.15s of CPU, so roughly 3% of one core per open session.
@@ -130,7 +134,8 @@ it points to is edited and the link kept; if that file is read-only (Nix
 home-manager), install stops and prints the `statusLine` entry to add there.
 
 Requires `jq` (1.6 or newer; 1.5 lacks `round` and `IN`, so the badge skips
-the transcript estimate and the env window) and `curl`. Machine must be logged into Claude Code
+the transcript estimate and the env window) and `curl` (7.55 or newer, for
+headers on stdin). Machine must be logged into Claude Code
 (`~/.claude/.credentials.json`) for the pre-first-message live limit fetch;
 without it the limits segment simply appears after the first message.
 

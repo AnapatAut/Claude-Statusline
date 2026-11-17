@@ -100,7 +100,8 @@ fi
 rm -f "$CFG/hooks/caveman-stats-refresh.sh"
 
 # 4. runtime files the statusline itself created (names are unique to it)
-rm -f "$CFG/.statusline-limits-fetch"
+rm -f "$CFG/.statusline-limits-fetch" "$CFG/.statusline-limits-fetch.tried"
+rm -f "$CFG"/.statusline-limits-fetch.?????? 2>/dev/null || true   # temp from an interrupted write
 rmdir "$CFG/.statusline-limits-fetch.lock" 2>/dev/null || true
 echo "runtime store cleaned"
 

@@ -93,6 +93,14 @@ Each of these is described in the header comment of the context block in
   have only a weekly limit, some both, API-key setups none.
 - Polling the endpoint by hand while sessions are open quickly returns
   HTTP 429; the badge then keeps its last stored numbers.
+- Every attempt, failed or not, stamps `.statusline-limits-fetch.tried`, and the
+  next fetch waits for the next :00/:30 boundary after the newer of that and the
+  store. Never let a failure leave the timing unchanged: every redraw of every
+  session would retry.
+- The token must never appear on a command line (`ps` shows it to every local
+  user): pass it to `curl` on stdin with `-H @-`.
+- Plan for a shared fetcher that other tools can use (`claude-usage`, its own
+  repo, a soft dependency): kept outside this repo for now.
 
 ## Releasing
 

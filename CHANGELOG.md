@@ -2,6 +2,28 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.3.2 — 2026-11-17 — Usage fetch: token off the command line, failure backoff
+
+### Security
+- **The OAuth token was visible to other local users.** The usage fetch passed
+  it to `curl` as a command-line argument, which any user on the machine can
+  read with `ps` while the request runs (up to 2 s, every 30 s). It now goes to
+  `curl` on stdin (`-H @-`, curl 7.55 or newer), so it never appears in the
+  process list.
+
+### Fixed
+- **A failing usage fetch retried on every redraw.** A 429, timeout or missing
+  token left the store's timestamp unchanged, so every redraw of every open
+  session fetched again (one call per session every 5 s), which kept a rate
+  limit going. Each attempt now stamps `.statusline-limits-fetch.tried`, and the
+  next one waits for the next :00/:30 boundary, the same pace as a successful
+  fetch. The last numbers stay on screen meanwhile.
+- **The usage store was readable by other users** (`0664`) and was written in
+  place, so a redraw could catch it half-written. It is now owner-only (`0600`)
+  and replaced whole (written to a temp file, then renamed).
+- `uninstall.sh` also removes the attempt marker and any temp file left by an
+  interrupted write; `install.sh` clears the marker with the store.
+
 ## v1.3.1 — 2026-11-03 — Executable install.sh
 
 ### Fixed

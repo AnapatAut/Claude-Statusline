@@ -309,16 +309,22 @@ fi
 # Color by tier (<50 green, 50-74 blue, 75-89 yellow, >=90 red) + compact reset countdown.
 # All sessions show identical values by reading ONE shared store, refreshed from
 # the OAuth usage endpoint on wall-clock 30s boundaries (xx:00 / xx:30) so they
-# update in lockstep regardless of when each session opened. No explicit
+# update in lockstep regardless of when each session opened. A failed fetch
+# also waits for the next boundary (one try per 30s machine-wide, no retry storm). No explicit
 # session-open trigger needed: if another session is active the store is <30s
 # fresh and gets reused (no fetch); if this is the only session the store is
 # stale, so the boundary check fires on the first render — instant limits
 # either way. Never more than one fetch per 5s. Harness rate_limits is fallback
 # only — per-session snapshots diverge, which the shared store exists to avoid.
 SHARED="$CFG/.statusline-limits-fetch"
+TRIED="$SHARED.tried"   # time of the last attempt, success or not
 now_s=$(date +%s)
 last=0
 [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && last=$(stat -c %Y "$SHARED" 2>/dev/null || echo 0)
+if [ -f "$TRIED" ] && [ ! -L "$TRIED" ]; then
+  t=$(stat -c %Y "$TRIED" 2>/dev/null || echo 0)
+  [ "$t" -gt "$last" ] && last=$t
+fi
 need=0
 [ $(( now_s / 30 )) -gt $(( last / 30 )) ] && need=1   # crossed a :00/:30 boundary since last fetch
 [ $(( now_s - last )) -lt 5 ] && need=0                # min 5s between fetches
@@ -330,11 +336,17 @@ if [ "$need" = 1 ]; then
   LOCK="$SHARED.lock"
   [ -d "$LOCK" ] && [ $(( now_s - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) )) -ge 10 ] && rmdir "$LOCK" 2>/dev/null
   if mkdir "$LOCK" 2>/dev/null; then
+    # record the attempt first: a failed fetch (429, timeout, no token) then
+    # waits for the next boundary like a successful one, instead of every
+    # redraw of every session retrying
+    [ -L "$TRIED" ] || { (umask 077; touch "$TRIED") 2>/dev/null; }
     tok=""
     _cfg_ok "$CFG/.credentials.json" 1048576 \
       && tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
     if [ -n "$tok" ]; then
-      lim=$(curl -sS -m 2 -H "Authorization: Bearer $tok" \
+      # the token goes to curl on stdin (-H @-, curl 7.55+), never on its
+      # command line, where any local user could read it with ps
+      lim=$(printf 'Authorization: Bearer %s\n' "$tok" | curl -sS -m 2 -H @- \
         -H "anthropic-beta: oauth-2025-04-20" \
         https://api.anthropic.com/api/oauth/usage 2>/dev/null | jq -r '
         def ep(x): if x == null then "" else
@@ -342,7 +354,13 @@ if [ "$need" = 1 ]; then
         def pc(x): if x == null then "" else (x | round | tostring) end;
         [pc(.five_hour.utilization), ep(.five_hour.resets_at),
          pc(.seven_day.utilization), ep(.seven_day.resets_at)] | join("\u001f")' 2>/dev/null)
-      printf '%s' "$lim" | grep -q '[0-9]' && printf '%s' "$lim" > "$SHARED" 2>/dev/null
+      if printf '%s' "$lim" | grep -q '[0-9]'; then
+        # owner-only (mktemp makes it 0600) and swapped in whole, so a redraw
+        # never reads a half-written store
+        tmp=$(mktemp "$SHARED.XXXXXX" 2>/dev/null) && {
+          printf '%s' "$lim" > "$tmp" && mv -f "$tmp" "$SHARED" || rm -f "$tmp"
+        } 2>/dev/null
+      fi
     fi
     rmdir "$LOCK" 2>/dev/null
   fi
