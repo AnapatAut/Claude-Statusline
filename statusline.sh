@@ -5,7 +5,8 @@
 #
 # Line 1 badges: model/effort, context usage vs the auto-compact threshold
 # (plain, untinted), usage limits (tiers: <50 green, 50-74 blue, 75-89 yellow,
-# >=90 red; clock-synced shared fetch, see below), caveman badge, ponytail badge.
+# >=90 red; from claude-usage when installed, else a clock-synced shared fetch,
+# see below), caveman badge, ponytail badge.
 # Line 2 prompt-style location in teal/steel-blue — deliberately NOT the classic
 # green/blue PS1 palette so it never reads as a real shell prompt. Long paths
 # get a whole line, so they can't push the badges off-screen.
@@ -307,90 +308,149 @@ fi
 
 # Claude usage limits: 5-hour + weekly (seven_day).
 # Color by tier (<50 green, 50-74 blue, 75-89 yellow, >=90 red) + compact reset countdown.
-# All sessions show identical values by reading ONE shared store, refreshed from
-# the OAuth usage endpoint on wall-clock 30s boundaries (xx:00 / xx:30) so they
-# update in lockstep regardless of when each session opened. A failed fetch
-# also waits for the next boundary (one try per 30s machine-wide, no retry storm). No explicit
-# session-open trigger needed: if another session is active the store is <30s
-# fresh and gets reused (no fetch); if this is the only session the store is
-# stale, so the boundary check fires on the first render — instant limits
-# either way. Never more than one fetch per 5s. Harness rate_limits is fallback
-# only — per-session snapshots diverge, which the shared store exists to avoid.
-# Account switches: the store is tagged with a stamp of .credentials.json
-# (inode, size, mtime to the nanosecond) taken before the token is read. Numbers
-# whose stamp differs from the file now are never shown (another account's, or
-# from before a logout), and new credentials get one immediate fetch.
-SHARED="$CFG/.statusline-limits-fetch"
-TRIED="$SHARED.tried"   # last attempt: its time, and the credentials stamp it used
-CREDS="$CFG/.credentials.json"
-cstamp=""   # empty = no credentials file (logged out, or Keychain only)
-[ -f "$CREDS" ] && cstamp=$(stat -L -c '%i.%s.%y' "$CREDS" 2>/dev/null | tr -cd '0-9.')
-[ -f "$CREDS" ] && [ -z "$cstamp" ] && cstamp=0   # stat failed: no switch detection
+#
+# Two sources of numbers, never both fetching (a second caller of the usage
+# endpoint draws HTTP 429s):
+#
+# 1. claude-usage installed (~/.local/bin/claude-usage, its own repo): it is the
+#    only fetcher. Each redraw runs `claude-usage get --refresh`, which reads its
+#    cache (never the network) and starts one detached fetch when one is due.
+#    This script then reads no token, calls no curl and writes no store. Output
+#    it cannot use (timeout, not one JSON object, unknown schema) shows Claude
+#    Code's own rate_limits for that redraw, never a fetch of our own. A window
+#    claude-usage has no numbers for (null, or its reset time has come) also
+#    takes the rate_limits window. Numbers older than 5 minutes (claude-usage
+#    could not refresh them: 429, expired token) stay on screen, dimmed.
+#
+# 2. claude-usage missing (always on macOS): our own fetch. All sessions show
+#    identical values by reading ONE shared store, refreshed from the OAuth usage
+#    endpoint on wall-clock 30s boundaries (xx:00 / xx:30) so they update in
+#    lockstep regardless of when each session opened. A failed fetch also waits
+#    for the next boundary (one try per 30s machine-wide, no retry storm). No
+#    explicit session-open trigger needed: if another session is active the
+#    store is <30s fresh and gets reused (no fetch); if this is the only session
+#    the store is stale, so the boundary check fires on the first render —
+#    instant limits either way. Never more than one fetch per 5s. Harness
+#    rate_limits is fallback only — per-session snapshots diverge, which the
+#    shared store exists to avoid. Account switches: the store is tagged with a
+#    stamp of .credentials.json (inode, size, mtime) taken before the token is
+#    read. Numbers whose stamp differs from the file now are never shown
+#    (another account's, or from before a logout), and new credentials get one
+#    immediate fetch.
 now_s=$(date +%s)
-last=0
-[ -f "$SHARED" ] && [ ! -L "$SHARED" ] && last=$(stat -c %Y "$SHARED" 2>/dev/null || echo 0)
-tstamp=""
-if [ -f "$TRIED" ] && [ ! -L "$TRIED" ]; then
-  t=$(stat -c %Y "$TRIED" 2>/dev/null || echo 0)
-  [ "$t" -gt "$last" ] && last=$t
-  tstamp=$(head -c 128 "$TRIED" 2>/dev/null | tr -cd '0-9.')
-fi
-need=0
-[ $(( now_s / 30 )) -gt $(( last / 30 )) ] && need=1   # crossed a :00/:30 boundary since last fetch
-[ -n "$cstamp" ] && [ "$cstamp" != "$tstamp" ] && need=1   # credentials not tried yet
-[ $(( now_s - last )) -lt 5 ] && need=0                # min 5s between fetches
-lim=""
-if [ "$need" = 1 ]; then
-  # single-flight: mkdir is atomic, so exactly one session per boundary does the
-  # GET even when several render simultaneously; losers read the store below.
-  # A lock left by a session killed mid-fetch is reclaimed after 10s.
-  LOCK="$SHARED.lock"
-  [ -d "$LOCK" ] && [ $(( now_s - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) )) -ge 10 ] && rmdir "$LOCK" 2>/dev/null
-  if mkdir "$LOCK" 2>/dev/null; then
-    # record the attempt first: a failed fetch (429, timeout, no token) then
-    # waits for the next boundary like a successful one, instead of every
-    # redraw of every session retrying
-    [ -L "$TRIED" ] || { (umask 077; printf '%s' "$cstamp" > "$TRIED") && chmod 600 "$TRIED"; } 2>/dev/null
-    tok=""
-    _cfg_ok "$CFG/.credentials.json" 1048576 \
-      && tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
-    if [ -n "$tok" ]; then
-      # the token goes to curl on stdin (-H @-, curl 7.55+), never on its
-      # command line, where any local user could read it with ps
-      lim=$(printf 'Authorization: Bearer %s\n' "$tok" | curl -sS -m 2 -H @- \
-        -H "anthropic-beta: oauth-2025-04-20" \
-        https://api.anthropic.com/api/oauth/usage 2>/dev/null | jq -r '
-        def ep(x): if x == null then "" else
-          (x | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601 | tostring) end;
-        def pc(x): if x == null then "" else (x | round | tostring) end;
-        [pc(.five_hour.utilization), ep(.five_hour.resets_at),
-         pc(.seven_day.utilization), ep(.seven_day.resets_at)] | join("\u001f")' 2>/dev/null)
-      if printf '%s' "$lim" | grep -q '[0-9]'; then
-        # owner-only (mktemp makes it 0600) and swapped in whole, so a redraw
-        # never reads a half-written store
-        tmp=$(mktemp "$SHARED.XXXXXX" 2>/dev/null) && {
-          printf '%s\037%s' "$lim" "$cstamp" > "$tmp" && mv -f "$tmp" "$SHARED" || rm -f "$tmp"
-        } 2>/dev/null
-      fi
-    fi
-    rmdir "$LOCK" 2>/dev/null
-  fi
-fi
-if ! printf '%s' "$lim" | grep -q '[0-9]' && [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && [ -n "$cstamp" ]; then
-  # 5th field: the credentials stamp the numbers were fetched with; a store
-  # without one (v1.3.2) or with another stamp belongs to other credentials
-  IFS=$'\x1f' read -r s1 s2 s3 s4 sst <<< "$(head -c 256 "$SHARED" 2>/dev/null | tr -cd '0-9.\037')"
-  [ "$sst" = "$cstamp" ] && lim=$(printf '%s\037%s\037%s\037%s' "$s1" "$s2" "$s3" "$s4")
-fi
-if ! printf '%s' "$lim" | grep -q '[0-9]'; then
-  # endpoint unreachable and no store yet -> harness data (may lag this session)
-  lim=$(printf '%s' "$input" | jq -r '
+lim=""      # session pct, session reset, weekly pct, weekly reset (0x1f-separated)
+O5="" O7=""  # "1" when that window's claude-usage numbers are old (dimmed)
+_rl() {  # Claude Code's rate_limits from stdin, same 4 fields (may lag this session)
+  printf '%s' "$input" | jq -r '
     def n2s: if . == null then ""
              elif type == "number" then (round | tostring)
              else tostring end;
     [(.rate_limits.five_hour.used_percentage | n2s), (.rate_limits.five_hour.resets_at | n2s),
      (.rate_limits.seven_day.used_percentage | n2s), (.rate_limits.seven_day.resets_at | n2s)]
-    | join("\u001f")' 2>/dev/null)
+    | join("\u001f")' 2>/dev/null
+}
+CU="$HOME/.local/bin/claude-usage"   # only there, never from PATH (a project's PATH can hold others' folders)
+if [ -f "$CU" ] && [ ! -L "$CU" ] && [ -x "$CU" ]; then
+  cu=""
+  if command -v timeout >/dev/null 2>&1; then
+    # bounded twice: timeout ends claude-usage after 1s, and read gives up after
+    # 2s even if something it started still holds the pipe open
+    IFS= read -r -d '' -t 2 cu < <(timeout 1 "$CU" get --refresh </dev/null 2>/dev/null | head -c 4096)
+  fi
+  # one JSON object of a known schema, else empty (= unusable). Per window: pct
+  # rounded and clamped 0..999, reset epoch or "" (window not started); a window
+  # without a number pct, or whose reset time has come, is empty. Last field:
+  # "1" when fetched_at is more than 300s old.
+  cu=$(printf '%s' "$cu" | jq -rs --argjson now "$now_s" '
+    def num: type == "number";
+    def w(x): if (x | type) == "object" and (x.pct | num)
+                 and (x.resets_at == null or ((x.resets_at | num) and x.resets_at > $now and x.resets_at < 1e11))
+              then [([[x.pct, 0] | max, 999] | min | round | tostring),
+                    (if x.resets_at == null then "" else (x.resets_at | floor | tostring) end)]
+              else ["", ""] end;
+    if length == 1 and (.[0] | type) == "object" and (.[0].schema == 0 or .[0].schema == 1)
+       and ((.[0].windows | type) == "object" or .[0].windows == null)
+    then .[0]
+      | (if (.fetched_at | num) and $now - .fetched_at > 300 then "1" else "" end) as $old
+      | w(.windows.five_hour) + w(.windows.seven_day) + [$old] | join("\u001f")
+    else empty end' 2>/dev/null)
+  IFS=$'\x1f' read -r c5 c5r c7 c7r cold <<< "$cu"
+  IFS=$'\x1f' read -r r5 r5r r7 r7r <<< "$(_rl)"
+  if [ -n "$c5" ]; then s5=$c5 s5r=$c5r O5=$cold; else s5=$r5 s5r=$r5r; fi
+  if [ -n "$c7" ]; then s7=$c7 s7r=$c7r O7=$cold; else s7=$r7 s7r=$r7r; fi
+  lim=$(printf '%s\037%s\037%s\037%s' "$s5" "$s5r" "$s7" "$s7r")
+else
+  SHARED="$CFG/.statusline-limits-fetch"
+  TRIED="$SHARED.tried"   # last attempt: its time, and the credentials stamp it used
+  CREDS="$CFG/.credentials.json"
+  # file times: GNU stat on Linux, BSD stat on macOS and the BSDs. A stat that
+  # fails reads as "never fetched", which would make every redraw fetch.
+  case "$OSTYPE" in
+    darwin*|*bsd*) _mt() { stat -f %m "$1" 2>/dev/null; }
+                   _cst() { stat -L -f '%i.%z.%m' "$1" 2>/dev/null; } ;;
+    *)             _mt() { stat -c %Y "$1" 2>/dev/null; }
+                   _cst() { stat -L -c '%i.%s.%y' "$1" 2>/dev/null; } ;;
+  esac
+  _mtime() { local t; t=$(_mt "$1"); case "$t" in ''|*[!0-9]*) t=0 ;; esac; printf '%s' "$t"; }
+  cstamp=""   # empty = no credentials file (logged out, or Keychain only)
+  [ -f "$CREDS" ] && cstamp=$(_cst "$CREDS" | tr -cd '0-9.')
+  [ -f "$CREDS" ] && [ -z "$cstamp" ] && cstamp=0   # stat failed: no switch detection
+  last=0
+  [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && last=$(_mtime "$SHARED")
+  tstamp=""
+  if [ -f "$TRIED" ] && [ ! -L "$TRIED" ]; then
+    t=$(_mtime "$TRIED")
+    [ "$t" -gt "$last" ] && last=$t
+    tstamp=$(head -c 128 "$TRIED" 2>/dev/null | tr -cd '0-9.')
+  fi
+  need=0
+  [ $(( now_s / 30 )) -gt $(( last / 30 )) ] && need=1   # crossed a :00/:30 boundary since last fetch
+  [ -n "$cstamp" ] && [ "$cstamp" != "$tstamp" ] && need=1   # credentials not tried yet
+  [ $(( now_s - last )) -lt 5 ] && need=0                # min 5s between fetches
+  if [ "$need" = 1 ]; then
+    # single-flight: mkdir is atomic, so exactly one session per boundary does the
+    # GET even when several render simultaneously; losers read the store below.
+    # A lock left by a session killed mid-fetch is reclaimed after 10s.
+    LOCK="$SHARED.lock"
+    [ -d "$LOCK" ] && [ $(( now_s - $(_mtime "$LOCK") )) -ge 10 ] && rmdir "$LOCK" 2>/dev/null
+    if mkdir "$LOCK" 2>/dev/null; then
+      # record the attempt first: a failed fetch (429, timeout, no token) then
+      # waits for the next boundary like a successful one, instead of every
+      # redraw of every session retrying
+      [ -L "$TRIED" ] || { (umask 077; printf '%s' "$cstamp" > "$TRIED") && chmod 600 "$TRIED"; } 2>/dev/null
+      tok=""
+      _cfg_ok "$CFG/.credentials.json" 1048576 \
+        && tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$CFG/.credentials.json" 2>/dev/null)
+      if [ -n "$tok" ]; then
+        # the token goes to curl on stdin (-H @-, curl 7.55+), never on its
+        # command line, where any local user could read it with ps
+        lim=$(printf 'Authorization: Bearer %s\n' "$tok" | curl -sS -m 2 -H @- \
+          -H "anthropic-beta: oauth-2025-04-20" \
+          https://api.anthropic.com/api/oauth/usage 2>/dev/null | jq -r '
+          def ep(x): if x == null then "" else
+            (x | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601 | tostring) end;
+          def pc(x): if x == null then "" else (x | round | tostring) end;
+          [pc(.five_hour.utilization), ep(.five_hour.resets_at),
+           pc(.seven_day.utilization), ep(.seven_day.resets_at)] | join("\u001f")' 2>/dev/null)
+        if printf '%s' "$lim" | grep -q '[0-9]'; then
+          # owner-only (mktemp makes it 0600) and swapped in whole, so a redraw
+          # never reads a half-written store
+          tmp=$(mktemp "$SHARED.XXXXXX" 2>/dev/null) && {
+            printf '%s\037%s' "$lim" "$cstamp" > "$tmp" && mv -f "$tmp" "$SHARED" || rm -f "$tmp"
+          } 2>/dev/null
+        fi
+      fi
+      rmdir "$LOCK" 2>/dev/null
+    fi
+  fi
+  if ! printf '%s' "$lim" | grep -q '[0-9]' && [ -f "$SHARED" ] && [ ! -L "$SHARED" ] && [ -n "$cstamp" ]; then
+    # 5th field: the credentials stamp the numbers were fetched with; a store
+    # without one (v1.3.2) or with another stamp belongs to other credentials
+    IFS=$'\x1f' read -r s1 s2 s3 s4 sst <<< "$(head -c 256 "$SHARED" 2>/dev/null | tr -cd '0-9.\037')"
+    [ "$sst" = "$cstamp" ] && lim=$(printf '%s\037%s\037%s\037%s' "$s1" "$s2" "$s3" "$s4")
+  fi
+  # endpoint unreachable and no store yet -> harness data (may lag this session)
+  printf '%s' "$lim" | grep -q '[0-9]' || lim=$(_rl)
 fi
 if [ -n "${lim// /}" ] && printf '%s' "$lim" | grep -q '[0-9]'; then
   IFS=$'\x1f' read -r H5 H5R D7 D7R <<< "$lim"
@@ -403,20 +463,21 @@ if [ -n "${lim// /}" ] && printf '%s' "$lim" | grep -q '[0-9]'; then
     elif [ "$d" -ge 3600 ];  then printf '%dh%dm' $((d/3600)) $(((d%3600)/60))
     else printf '%dm' $((d/60)); fi
   }
-  _seg() {  # label pct epoch -> "label pct ↻ countdown" (label grey, pct bold/threshold, countdown dim)
-    local pct=$2 cd; cd=$(_cd "$3")
+  _seg() {  # label pct epoch [old] -> "label pct ↻ countdown" (label grey, pct bold/threshold, countdown dim)
+    local pct=$2 cd w=1; cd=$(_cd "$3")
     # harness only refreshes rate_limits on API responses, so after the window
     # resets it keeps sending stale pre-reset numbers; the window reset means
     # usage is back to 0, and the next reset time is unknown until fresh data
     if [ "$cd" = "now" ]; then pct=0; cd=""; fi
-    printf '\033[38;5;250m%s \033[1;38;5;%sm%s%%\033[0m' "$1" "$(_cc "$pct")" "$pct"
+    [ -n "$4" ] && w=2   # old numbers: faint instead of bold, tier color kept
+    printf '\033[38;5;250m%s \033[%s;38;5;%sm%s%%\033[0m' "$1" "$w" "$(_cc "$pct")" "$pct"
     [ -n "$cd" ] && printf ' \033[38;5;245m↻ %s\033[0m' "$cd"
   }
   out=""
-  [ -n "$H5" ] && out="$out$(_seg Session "$H5" "$H5R")"
+  [ -n "$H5" ] && out="$out$(_seg Session "$H5" "$H5R" "$O5")"
   if [ -n "$D7" ]; then
     [ -n "$out" ] && out="$out \033[38;5;245m·\033[0m "
-    out="$out$(_seg Weekly "$D7" "$D7R")"
+    out="$out$(_seg Weekly "$D7" "$D7R" "$O7")"
   fi
   # bright brackets + inner padding for legibility
   [ -n "$out" ] && printf ' \033[1;38;5;252m[\033[0m %b \033[1;38;5;252m]\033[0m' "$out"

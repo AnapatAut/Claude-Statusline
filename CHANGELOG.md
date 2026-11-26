@@ -2,6 +2,40 @@
 
 All notable changes to the custom Claude Code statusline.
 
+## v1.4.0 — 2026-11-26 — Usage limits from claude-usage
+
+### Added
+- **Usage numbers from [claude-usage](https://github.com/AnapatAut/Claude-Usage)
+  when it is installed.** claude-usage is a separate program that fetches the
+  usage limits for every tool on the machine, so the endpoint gets one caller
+  instead of one per tool (a second caller quickly draws HTTP 429). When
+  `~/.local/bin/claude-usage` is there (a regular executable file, not a
+  symlink; never looked up on `PATH`), each redraw runs
+  `claude-usage get --refresh`, which reads its cache and starts a background
+  fetch when one is due. The status line then reads no token, runs no `curl`
+  and writes no store of its own.
+  - A window claude-usage has no numbers for (the account does not report it,
+    or its reset time has come) shows Claude Code's own `rate_limits` for that
+    window, or nothing.
+  - Numbers fetched more than 5 minutes ago (claude-usage could not refresh
+    them, for example after a 429 or an expired token) stay on screen with
+    the percentage dimmed.
+  - If claude-usage answers with something unusable (no answer within 1 s, not
+    one JSON object, an interface version it does not know), that redraw shows
+    Claude Code's `rate_limits` only. It never falls back to its own fetch
+    then, which would put two callers back.
+  - Without claude-usage nothing changes: the status line fetches by itself
+    as before. With it installed, `.statusline-limits-fetch` and
+    `.statusline-limits-fetch.tried` in the Claude config folder are no longer
+    written and can be deleted.
+
+### Fixed
+- **On macOS the usage fetch ran on every redraw.** The fetch timing read file
+  times with GNU `stat -c`, which macOS and the BSDs do not have; the failed
+  read counted as "never fetched", so every redraw of every session fetched
+  again whenever a `.credentials.json` existed. File times are now read with
+  `stat -f` there.
+
 ## v1.3.3 — 2026-11-17 — Usage limits follow account switches
 
 ### Fixed

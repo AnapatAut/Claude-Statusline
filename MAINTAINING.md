@@ -86,9 +86,25 @@ Each of these is described in the header comment of the context block in
 
 ## Usage limits
 
-- Source: `GET https://api.anthropic.com/api/oauth/usage` with the OAuth
-  token, at most once per 30 s across all sessions. If it can't be reached,
-  the badge uses the `rate_limits` Claude Code sends to the statusline.
+- Two sources, never both fetching (the endpoint answers a second caller with
+  HTTP 429):
+  - **claude-usage installed** (`~/.local/bin/claude-usage`, regular file, not
+    a symlink, executable; never from `PATH`): the status line is its client.
+    Contract (`claude-usage get`, schema 0 = draft, 1 = frozen): one JSON
+    object `{schema, fetched_at, error, windows: {five_hour, seven_day}}`,
+    each window `{pct, resets_at}` or `null`, times in Unix seconds, `pct` as
+    the endpoint sent it (can exceed 100). Rules kept in `statusline.sh`:
+    unknown schema or unusable output shows `rate_limits` only, never a fetch
+    of our own; a `null` window or one whose `resets_at` has come takes the
+    `rate_limits` window; `fetched_at` older than 300 s dims the percentage;
+    the call is bounded twice (`timeout 1`, and `read -t 2` in case a child of
+    claude-usage keeps the pipe open). When claude-usage changes its schema,
+    re-read its README before accepting the new number.
+  - **claude-usage missing** (always on macOS): our own fetch, below.
+- Source of our own fetch: `GET https://api.anthropic.com/api/oauth/usage`
+  with the OAuth token, at most once per 30 s across all sessions. If it can't
+  be reached, the badge uses the `rate_limits` Claude Code sends to the
+  statusline.
 - A window the account doesn't report (`null`) is hidden: some accounts
   have only a weekly limit, some both, API-key setups none.
 - Polling the endpoint by hand while sessions are open quickly returns
@@ -100,13 +116,18 @@ Each of these is described in the header comment of the context block in
 - The token must never appear on a command line (`ps` shows it to every local
   user): pass it to `curl` on stdin with `-H @-`.
 - Account switches: the store's 5th field and the `.tried` marker hold a stamp
-  of `.credentials.json` (inode, size, mtime in ns, digits and dots only, taken
-  before the token is read). Show stored numbers only when their stamp matches
-  the file now; fetch once at once when the stamp differs from the last
-  attempt's. Compare for "different", not "newer": a swap tool using `cp -p`
+  of `.credentials.json` (inode, size, mtime: in ns on Linux, in seconds on
+  macOS/BSD; digits and dots only, taken before the token is read). Show
+  stored numbers only when their stamp matches the file now; fetch once at
+  once when the stamp differs from the last attempt's. Compare for "different", not "newer": a swap tool using `cp -p`
   restores an older mtime.
-- Plan for a shared fetcher that other tools can use (`claude-usage`, its own
-  repo, a soft dependency): kept outside this repo for now.
+- File times in the fallback come from `stat -c` (GNU) or `stat -f` (macOS,
+  BSD), picked from `$OSTYPE`. A stat that fails reads as "never fetched" and
+  makes every redraw fetch, so test both forms after touching that code.
+- Tests (kept outside the repo): the fallback suite (fake `curl`, throwaway
+  `CLAUDE_CONFIG_DIR` and `HOME`) and the client suite (fake `claude-usage`
+  for every answer shape, plus a fake BSD `stat` for the macOS path). A client
+  test must also show that no `curl` runs and no store is written.
 
 ## Releasing
 

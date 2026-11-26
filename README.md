@@ -59,23 +59,40 @@ user@host:~/some/long/project/dir
 - **Session / Weekly limits** — color tiers (<50 green, 50–74 blue, 75–89 yellow, ≥90 red), compact reset countdown (`2d7h` → `3h53m` → `29m` as reset nears).
   Shows only the windows the account reports: both, Session only, Weekly
   only, or no badge at all (API-key setups report none).
-  All sessions read one shared store refreshed from the OAuth usage endpoint on
-  wall-clock 30s boundaries (xx:00/xx:30), so every session shows identical values
-  and they update in lockstep. Single-flight lock: exactly one GET per boundary no
-  matter how many sessions are open; min 5s between fetches. A failed fetch (429,
-  timeout) also waits for the next boundary, so an outage never turns into a
-  retry storm; the last numbers stay on screen meanwhile. The OAuth token goes to
-  `curl` on stdin, never on its command line, and the store is owner-only
-  (`0600`), replaced whole on each write. Account switches (`/login`, or a tool
-  that swaps `.credentials.json`): the stored numbers are tagged with the
-  credentials they were fetched with and never shown for others; new credentials
-  get one fetch at once, and until it lands the badge uses Claude Code's own
-  `rate_limits`. After a logout the store is hidden. The badge follows the
-  account in `.credentials.json`; a session still holding an older account in
-  memory shows that file's account. First session after
-  idle fetches on open (instant limits). Expired windows display 0% instead of
-  stale pre-reset numbers. Statusline repaints every 5s; a render costs about
-  0.15s of CPU, so roughly 3% of one core per open session.
+  - **With [claude-usage](https://github.com/AnapatAut/Claude-Usage)
+    installed** (optional, Linux): the numbers come from it. claude-usage is
+    one fetcher for every tool on the machine, so the usage endpoint gets one
+    caller instead of one per tool. The status line looks only at
+    `~/.local/bin/claude-usage` (a regular executable file, not a symlink;
+    never on `PATH`) and runs `claude-usage get --refresh` on each redraw: a
+    read of its cache that also starts a background fetch when one is due. It
+    then reads no token, runs no `curl` and writes no store of its own. A
+    window claude-usage has no numbers for (not reported, or its reset time has
+    come) shows Claude Code's own `rate_limits` for that window. Numbers more
+    than 5 minutes old (claude-usage could not refresh them: 429, expired
+    token) stay, with the percentage dimmed. An unusable answer (none within
+    1 s, not one JSON object, an unknown interface version) shows
+    `rate_limits` for that redraw, never a fetch of the status line's own:
+    two callers draw HTTP 429s.
+  - **Without it** (and always on macOS), the status line fetches by itself:
+    all sessions read one shared store refreshed from the OAuth usage endpoint on
+    wall-clock 30s boundaries (xx:00/xx:30), so every session shows identical
+    values and they update in lockstep. Single-flight lock: exactly one GET per
+    boundary no matter how many sessions are open; min 5s between fetches. A
+    failed fetch (429, timeout) also waits for the next boundary, so an outage
+    never turns into a retry storm; the last numbers stay on screen meanwhile. The
+    OAuth token goes to `curl` on stdin, never on its command line, and the store
+    is owner-only (`0600`), replaced whole on each write. Account switches
+    (`/login`, or a tool that swaps `.credentials.json`): the stored numbers are
+    tagged with the credentials they were fetched with and never shown for others;
+    new credentials get one fetch at once, and until it lands the badge uses
+    Claude Code's own `rate_limits`. After a logout the store is hidden. The badge
+    follows the account in `.credentials.json`; a session still holding an older
+    account in memory shows that file's account. First session after idle fetches
+    on open (instant limits). Expired windows display 0% instead of stale
+    pre-reset numbers.
+  Statusline repaints every 5s; a render costs about 0.15s of CPU, so roughly
+  3% of one core per open session.
 - **caveman badge** — only if the [caveman](https://github.com/JuliusBrussee/caveman) plugin is active; silently absent otherwise.
   Both mode badges double-check `enabledPlugins` in `~/.claude/settings.json`:
   disabling a plugin stops its hooks but leaves the old mode-flag file behind,
@@ -143,7 +160,10 @@ Requires `jq` (1.6 or newer; 1.5 lacks `round` and `IN`, so the badge skips
 the transcript estimate and the env window) and `curl` (7.55 or newer, for
 headers on stdin). Machine must be logged into Claude Code
 (`~/.claude/.credentials.json`) for the pre-first-message live limit fetch;
-without it the limits segment simply appears after the first message.
+without it the limits segment simply appears after the first message. Optional:
+[claude-usage](https://github.com/AnapatAut/Claude-Usage) (Linux x86_64), then
+the status line takes its numbers from it and stops fetching by itself; it
+needs `timeout` (coreutils) to call it.
 
 If a different `statusline.sh` already exists, install backs it up
 (`statusline.sh.pre-install.<timestamp>`) before overwriting.
